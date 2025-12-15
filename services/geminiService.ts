@@ -23,6 +23,52 @@ const getApiKey = () => {
   return apiKey;
 };
 
+/**
+ * Compress base64 image to JPEG at specified quality
+ * This ensures true JPEG compression and smaller file sizes
+ */
+const compressToJPEG = async (base64Data: string, quality: number = 0.85): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    // Create image element
+    const img = new Image();
+
+    img.onload = () => {
+      // Create canvas
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error("Could not get canvas context"));
+        return;
+      }
+
+      // Draw image to canvas
+      ctx.drawImage(img, 0, 0);
+
+      // Export as JPEG with quality setting
+      const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
+
+      // Remove data URL prefix and return base64
+      const base64 = compressedDataUrl.split(',')[1];
+      resolve(base64);
+    };
+
+    img.onerror = () => reject(new Error("Failed to load image for compression"));
+
+    // Load image from base64
+    img.src = `data:image/jpeg;base64,${base64Data}`;
+  });
+};
+
+// Helper to map app aspect ratios to supported API ratios
+// Supported: '1:1', '3:4', '4:3', '9:16', '16:9'
+const getSupportedAspectRatio = (ratio: AspectRatio): string => {
+    const supported = ['1:1', '3:4', '4:3', '9:16', '16:9'];
+    return supported.includes(ratio) ? ratio : '16:9';
+};
+
 export const analyzeAudioCreatively = async (file: File): Promise<AudioAnalysis> => {
   const ai = new GoogleGenAI({ apiKey: getApiKey() });
   const base64Audio = await parseAudioToBase64(file);
@@ -38,7 +84,7 @@ export const analyzeAudioCreatively = async (file: File): Promise<AudioAnalysis>
         description: "List of 3 main instruments present or simulated"
       },
       bpm: { type: Type.INTEGER, description: "Estimated BPM of the track" },
-      lyrics: { type: Type.STRING, description: "If there are vocals, provide the lyrics (or a summary of spoken word). If instrumental, say 'Instrumental'." }
+      lyrics: { type: Type.STRING, description: "If there are vocals, provide the lyrics (or a summary of spoken word). If instrumental, say 'Instrumental'. Format lyrics properly" }
     },
     required: ["genre", "theme", "instruments", "lyrics"]
   };
@@ -135,10 +181,11 @@ export const generateVideoNarrative = async (
     Constraints:
     1. The video must have exactly ${cutCount} shots (scenes).
     2. No dialogue. Pure visual storytelling.
-    3. The narrative should flow smoothly, designed for morphing/interpolation between shots.
-    4. Define the characters needed and assign them unique IDs.
-    5. For each scene, you MUST list the 'characterIds' of any characters present.
-    6. Output JSON.
+	3. The Lyrics only exist to provide you context. The narrative does not have to be 1:1 what is in the lyrics or show whatever is in the lyrics as is. Just convey the feeling. This is for a music video. It can be a completely different story as long as the song makes sense when played under it. Lyrics are just a guide to give you an idea of what the music video is about.
+    4. The narrative should flow smoothly, designed for morphing/interpolation between shots.
+    5. Define the characters needed and assign them unique IDs.
+    6. For each scene, you MUST list the 'characterIds' of any characters present.
+    7. Output JSON.
   `;
 
   const response = await ai.models.generateContent({
@@ -174,15 +221,17 @@ export const generateCharacterSheet = async (
   const ai = new GoogleGenAI({ apiKey: getApiKey() });
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash-image",
+    model: "gemini-3-pro-image-preview",
     contents: {
       parts: [
-        { text: `Character Sheet, 1:1 Aspect Ratio, High Quality, Concept Art. Style: ${style}. ${char.description}` }
+        { text: `You will be provided with a style and a character description, go through it, understand what the character must look like and create a 2X2 grid character sheet of the character with a closeup, mid body shot, a full body shot and a backview shot of the character standing against a neutral background . Style: ${style}. ${char.description}` }
       ]
     },
     config: {
       imageConfig: {
-        aspectRatio: "1:1" // Character sheets are always 1:1 as per requirements
+        aspectRatio: "1:1",
+		imageSize: "2K",
+		output_mime_type: "image/jpeg"
       }
     }
   });
@@ -190,7 +239,8 @@ export const generateCharacterSheet = async (
   // Extract image
   for (const part of response.candidates?.[0]?.content?.parts || []) {
     if (part.inlineData) {
-      return part.inlineData.data;
+      // Compress to true JPEG at 85% quality
+      return await compressToJPEG(part.inlineData.data, 0.85);
     }
   }
   throw new Error("No image generated for character");
@@ -217,7 +267,7 @@ export const generateFirstFrame = async (
           if (c.imageUrl) {
             parts.push({
                 inlineData: {
-                    mimeType: "image/png",
+                    mimeType: "image/jpeg",
                     data: c.imageUrl
                 }
             });
@@ -244,18 +294,21 @@ export const generateFirstFrame = async (
   }
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash-image",
+    model: "gemini-3-pro-image-preview",
     contents: { parts },
     config: {
       imageConfig: {
-        aspectRatio: aspectRatio === '1:1' ? '1:1' : aspectRatio === '9:16' ? '9:16' : '16:9' // Mapping simplified
+        aspectRatio: getSupportedAspectRatio(aspectRatio),
+        imageSize: "2K",
+		output_mime_type: "image/jpeg"
       }
     }
   });
 
   for (const part of response.candidates?.[0]?.content?.parts || []) {
     if (part.inlineData) {
-      return part.inlineData.data;
+      // Compress to true JPEG at 85% quality
+      return await compressToJPEG(part.inlineData.data, 0.85);
     }
   }
   throw new Error("No image generated for first frame");
@@ -327,7 +380,7 @@ export const generateNextFrame = async (
   const parts: any[] = [
     {
       inlineData: {
-        mimeType: "image/png",
+        mimeType: "image/jpeg",
         data: prevFrameBase64
       }
     }
@@ -342,7 +395,7 @@ export const generateNextFrame = async (
          if (c.imageUrl) {
             parts.push({
                 inlineData: {
-                    mimeType: "image/png",
+                    mimeType: "image/jpeg",
                     data: c.imageUrl
                 }
             });
@@ -369,18 +422,21 @@ export const generateNextFrame = async (
   }
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash-image",
+    model: "gemini-3-pro-image-preview",
     contents: { parts },
     config: {
       imageConfig: {
-          aspectRatio: aspectRatio === '1:1' ? '1:1' : aspectRatio === '9:16' ? '9:16' : '16:9'
+          aspectRatio: getSupportedAspectRatio(aspectRatio),
+		  imageSize: "2K",
+		  output_mime_type: "image/jpeg"
       }
     }
   });
 
   for (const part of response.candidates?.[0]?.content?.parts || []) {
     if (part.inlineData) {
-      return part.inlineData.data;
+      // Compress to true JPEG at 85% quality
+      return await compressToJPEG(part.inlineData.data, 0.85);
     }
   }
   throw new Error("No image generated for next frame");

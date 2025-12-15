@@ -348,6 +348,35 @@ const App: React.FC = () => {
                          <div className="bg-slate-950 border border-slate-800 rounded-xl p-6 flex flex-col items-center">
                             <span className="text-4xl font-bold text-indigo-400">{markers.length}</span>
                             <span className="text-xs text-slate-500 uppercase mt-1">Total Cuts Generated</span>
+                            <div className="mt-3 pt-3 border-t border-slate-800 w-full text-center">
+                              <span className="text-2xl font-bold text-emerald-400">
+                                ${(() => {
+                                  // Image cost: $0.14 per frame
+                                  const imageCost = markers.length * 0.14;
+
+                                  // Video cost based on shot durations
+                                  let videoCost = 0;
+                                  for (let i = 0; i < markers.length; i++) {
+                                    const currentMarker = markers[i];
+                                    const nextMarker = markers[i + 1];
+                                    const duration = nextMarker
+                                      ? nextMarker.time - currentMarker.time
+                                      : audioState.duration - currentMarker.time;
+
+                                    // Up to 5s = $0.35, longer than 5s = $0.70
+                                    videoCost += duration <= 5 ? 0.35 : 0.70;
+                                  }
+
+                                  const totalCost = imageCost + videoCost;
+                                  return totalCost.toFixed(2);
+                                })()}
+                              </span>
+                              <div className="text-[10px] text-slate-500 uppercase mt-1">Est. Total Cost</div>
+                              <div className="text-[9px] text-slate-600 mt-0.5">
+                                Images: ${(markers.length * 0.14).toFixed(2)} |
+                                Videos: ≤5s=$0.35 &gt;5s=$0.70
+                              </div>
+                            </div>
                         </div>
                     </div>
                 </div>

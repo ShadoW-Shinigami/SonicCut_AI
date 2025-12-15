@@ -46,6 +46,22 @@ export const getFFmpeg = async (onProgress?: (progress: number) => void): Promis
 export const isFFmpegLoaded = (): boolean => ffmpegLoaded;
 
 /**
+ * Timeout wrapper for FFmpeg operations
+ * Prevents hanging on corrupted videos
+ */
+const withTimeout = async <T>(
+  promise: Promise<T>,
+  timeoutMs: number = 120000, // 2 minutes default
+  errorMessage: string = 'Operation timed out'
+): Promise<T> => {
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]);
+};
+
+/**
  * Apply speed ramp with smooth ease-in-out curve
  * Uses FFmpeg setpts filter with expression for smooth acceleration/deceleration
  */
@@ -72,11 +88,15 @@ export const applySpeedRamp = async (
 
   if (Math.abs(speedFactor - 1) < 0.05) {
     // If speed is nearly 1x, just copy
-    await ff.exec([
-      '-i', 'input.mp4',
-      '-c', 'copy',
-      '-y', 'output.mp4'
-    ]);
+    await withTimeout(
+      ff.exec([
+        '-i', 'input.mp4',
+        '-c', 'copy',
+        '-y', 'output.mp4'
+      ]),
+      120000,
+      'FFmpeg copy operation timed out after 2 minutes'
+    );
   } else {
     // Apply speed change with smooth interpolation
     // setpts adjusts video timing, atempo adjusts audio
@@ -86,15 +106,19 @@ export const applySpeedRamp = async (
 
     // Video-only processing (Kling videos don't have audio)
     // We only apply video filters to avoid the "matches no streams" error
-    await ff.exec([
-      '-i', 'input.mp4',
-      '-filter:v', `setpts=${ptsExpr}`,
-      '-c:v', 'libx264',
-      '-preset', 'fast',
-      '-crf', '23',
-      '-an',  // No audio
-      '-y', 'output.mp4'
-    ]);
+    await withTimeout(
+      ff.exec([
+        '-i', 'input.mp4',
+        '-filter:v', `setpts=${ptsExpr}`,
+        '-c:v', 'libx264',
+        '-preset', 'fast',
+        '-crf', '23',
+        '-an',  // No audio
+        '-y', 'output.mp4'
+      ]),
+      120000,
+      'FFmpeg speed ramp operation timed out after 2 minutes'
+    );
   }
 
   const outputData = await ff.readFile('output.mp4');
@@ -217,13 +241,17 @@ export const stitchVideos = async (
   await ff.writeFile('concat.txt', concatContent);
 
   // Concatenate videos
-  await ff.exec([
-    '-f', 'concat',
-    '-safe', '0',
-    '-i', 'concat.txt',
-    '-c', 'copy',
-    '-y', 'final_output.mp4'
-  ]);
+  await withTimeout(
+    ff.exec([
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', 'concat.txt',
+      '-c', 'copy',
+      '-y', 'final_output.mp4'
+    ]),
+    180000, // 3 minutes for stitching (longer for many clips)
+    'FFmpeg stitching operation timed out after 3 minutes'
+  );
 
   const outputData = await ff.readFile('final_output.mp4');
 
@@ -276,8 +304,8 @@ export const generateBlackFrame = (aspectRatio: AspectRatio): string => {
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, dims.width, dims.height);
 
-  // Export as base64 PNG (remove data URI prefix)
-  const dataUrl = canvas.toDataURL('image/png');
+  // Export as base64 JPEG (remove data URI prefix)
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
   return dataUrl.split(',')[1];
 };
 

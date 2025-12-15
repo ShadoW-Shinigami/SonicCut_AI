@@ -184,12 +184,12 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
 
         // First Frame
         const firstFrameData = frame.imageUrl || blackFrame;
-        folder.file("First_Frame.png", firstFrameData, {base64: true});
+        folder.file("First_Frame.jpg", firstFrameData, {base64: true});
 
         // Last Frame (Next frame's start, or black if end)
         const nextFrame = storyboard[index + 1];
         const lastFrameData = nextFrame?.imageUrl || blackFrame;
-        folder.file("Last_Frame.png", lastFrameData, {base64: true});
+        folder.file("Last_Frame.jpg", lastFrameData, {base64: true});
 
         // Prompt
         folder.file("Prompt.txt", frame.interpolationPrompt || "No prompt generated");
@@ -293,58 +293,74 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
       progress: 0
     }));
 
-    // Step 1: Generate videos from Kling API
-    for (let i = 0; i < clips.length; i++) {
+    // Step 1: Generate videos from Kling API (2 at a time)
+    const CONCURRENT_GENERATIONS = 2;
+
+    for (let i = 0; i < clips.length; i += CONCURRENT_GENERATIONS) {
       if (videoStopRef.current) break;
 
-      const frame = storyboard[i];
-      const nextFrame = storyboard[i + 1];
+      // Process batch of clips (up to 2 at a time)
+      const batchIndices = [];
+      for (let j = i; j < Math.min(i + CONCURRENT_GENERATIONS, clips.length); j++) {
+        batchIndices.push(j);
+      }
 
-      clips[i].status = 'generating';
-      setVideoClips([...clips]);
+      // Generate videos in parallel for this batch
+      await Promise.all(batchIndices.map(async (clipIndex) => {
+        if (videoStopRef.current) return;
 
-      const lastFrameBase64 = nextFrame?.imageUrl || generateBlackFrame(aspectRatio);
-      let success = false;
+        const frame = storyboard[clipIndex];
+        const nextFrame = storyboard[clipIndex + 1];
 
-      // Retry loop with progressively safer prompts
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (videoStopRef.current) break;
+        clips[clipIndex].status = 'generating';
+        setVideoClips([...clips]);
 
-        try {
-          // Sanitize interpolation prompt for retries using Gemini
-          let prompt = frame.interpolationPrompt;
-          if (attempt === 1) {
-            prompt = await sanitizePrompt(frame.interpolationPrompt, 'moderate');
-          } else if (attempt === 2) {
-            prompt = await sanitizePrompt(frame.interpolationPrompt, 'strict');
+        const lastFrameBase64 = nextFrame?.imageUrl || generateBlackFrame(aspectRatio);
+        let success = false;
+
+        // Retry loop with progressively safer prompts
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (videoStopRef.current) break;
+
+          try {
+            // Sanitize interpolation prompt for retries using Gemini
+            let prompt = frame.interpolationPrompt;
+            if (attempt === 1) {
+              prompt = await sanitizePrompt(frame.interpolationPrompt, 'moderate');
+            } else if (attempt === 2) {
+              prompt = await sanitizePrompt(frame.interpolationPrompt, 'strict');
+            }
+
+            const result = await generateVideoClip({
+              prompt: prompt,
+              firstFrameBase64: frame.imageUrl!,
+              lastFrameBase64: lastFrameBase64,
+              duration: selectVideoDuration(clips[clipIndex].targetDuration)
+            });
+
+            clips[clipIndex].generatedVideoUrl = result.videoUrl;
+            clips[clipIndex].status = 'processing';
+            success = true;
+            break; // Success, exit retry loop
+          } catch (e) {
+            console.warn(`Video generation for shot ${clipIndex + 1} attempt ${attempt + 1} failed:`, e);
           }
-
-          const result = await generateVideoClip({
-            prompt: prompt,
-            firstFrameBase64: frame.imageUrl!,
-            lastFrameBase64: lastFrameBase64,
-            duration: selectVideoDuration(clips[i].targetDuration)
-          });
-
-          clips[i].generatedVideoUrl = result.videoUrl;
-          clips[i].status = 'processing';
-          success = true;
-          break; // Success, exit retry loop
-        } catch (e) {
-          console.warn(`Video generation for shot ${i + 1} attempt ${attempt + 1} failed:`, e);
         }
-      }
 
-      // If all attempts failed
-      if (!success && !videoStopRef.current) {
-        clips[i].status = 'error';
-        clips[i].error = "Generation failed after 3 attempts";
-      }
+        // If all attempts failed
+        if (!success && !videoStopRef.current) {
+          clips[clipIndex].status = 'error';
+          clips[clipIndex].error = "Generation failed after 3 attempts";
+        }
 
-      setVideoClips([...clips]);
+        setVideoClips([...clips]);
+      }));
+
+      // Update progress after batch completes
+      const completedCount = Math.min(i + CONCURRENT_GENERATIONS, clips.length);
       setVideoState(prev => ({
         ...prev,
-        progress: ((i + 1) / clips.length) * 33
+        progress: (completedCount / clips.length) * 33
       }));
     }
 
@@ -468,6 +484,83 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
   // Phase 3: Stop video generation
   const handleVideoStop = () => {
     videoStopRef.current = true;
+  };
+
+  // Phase 3: Regenerate a single shot
+  const regenerateSingleShot = async (clipIndex: number) => {
+    const clips = [...videoClips];
+    const frame = storyboard[clipIndex];
+    const nextFrame = storyboard[clipIndex + 1];
+
+    clips[clipIndex].status = 'generating';
+    clips[clipIndex].error = undefined;
+    setVideoClips([...clips]);
+
+    const lastFrameBase64 = nextFrame?.imageUrl || generateBlackFrame(aspectRatio);
+    let success = false;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        let prompt = frame.interpolationPrompt;
+        if (attempt === 1) {
+          prompt = await sanitizePrompt(frame.interpolationPrompt, 'moderate');
+        } else if (attempt === 2) {
+          prompt = await sanitizePrompt(frame.interpolationPrompt, 'strict');
+        }
+
+        const result = await generateVideoClip({
+          prompt: prompt,
+          firstFrameBase64: frame.imageUrl!,
+          lastFrameBase64: lastFrameBase64,
+          duration: selectVideoDuration(clips[clipIndex].targetDuration)
+        });
+
+        clips[clipIndex].generatedVideoUrl = result.videoUrl;
+        clips[clipIndex].status = 'processing';
+        success = true;
+        break;
+      } catch (e) {
+        console.warn(`Regenerate attempt ${attempt + 1} failed:`, e);
+      }
+    }
+
+    if (!success) {
+      clips[clipIndex].status = 'error';
+      clips[clipIndex].error = "Regeneration failed after 3 attempts";
+    }
+
+    setVideoClips([...clips]);
+  };
+
+  // Phase 3: Reprocess a single shot (fetch + speed ramp)
+  const reprocessSingleShot = async (clipIndex: number) => {
+    const clips = [...videoClips];
+
+    if (!clips[clipIndex].generatedVideoUrl) {
+      alert("No generated video URL found. Please regenerate this shot first.");
+      return;
+    }
+
+    clips[clipIndex].status = 'processing';
+    clips[clipIndex].error = undefined;
+    setVideoClips([...clips]);
+
+    try {
+      const videoBlob = await fetchVideoAsBlob(clips[clipIndex].generatedVideoUrl!);
+      const processedBlob = await applySpeedRamp(videoBlob, clips[clipIndex].speedFactor);
+
+      clips[clipIndex].processedVideoBlob = processedBlob;
+      clips[clipIndex].status = 'ready';
+
+      const previewUrl = createVideoUrl(processedBlob);
+      setClipVideoUrls(prev => ({ ...prev, [clips[clipIndex].id]: previewUrl }));
+    } catch (e) {
+      console.error(`Reprocess failed for shot ${clipIndex + 1}:`, e);
+      clips[clipIndex].status = 'error';
+      clips[clipIndex].error = `Reprocess failed: ${(e as Error).message}`;
+    }
+
+    setVideoClips([...clips]);
   };
 
   // Phase 3: Cleanup URLs on unmount only
@@ -617,7 +710,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
                               <div key={char.id} className="flex gap-3 items-start bg-slate-950 p-3 rounded-lg border border-slate-800">
                                   <div className="w-12 h-12 bg-slate-900 rounded-md flex-shrink-0 overflow-hidden border border-slate-700">
                                       {char.imageUrl ? (
-                                          <img src={`data:image/png;base64,${char.imageUrl}`} alt={char.name} className="w-full h-full object-cover" />
+                                          <img src={`data:image/jpeg;base64,${char.imageUrl}`} alt={char.name} className="w-full h-full object-cover" />
                                       ) : (
                                           <div className="w-full h-full flex items-center justify-center text-slate-600">
                                               <User className="w-6 h-6" />
@@ -667,7 +760,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
                                        </div>
 
                                        {frame.imageUrl ? (
-                                           <img src={`data:image/png;base64,${frame.imageUrl}`} alt="Scene" className="w-full h-full object-cover" />
+                                           <img src={`data:image/jpeg;base64,${frame.imageUrl}`} alt="Scene" className="w-full h-full object-cover" />
                                        ) : frame.isGenerating ? (
                                            <div className="flex flex-col items-center gap-2">
                                                <Loader2 className="w-8 h-8 text-pink-500 animate-spin" />
@@ -684,11 +777,13 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
                                        )}
                                        
                                        {/* Hover Desc */}
-                                       <div className="absolute inset-0 bg-black/80 p-4 opacity-0 group-hover/card:opacity-100 transition-opacity flex flex-col items-center justify-center text-center">
-                                           <p className="text-xs text-slate-300 mb-2">{frame.description}</p>
-                                           
-                                           {/* Action Buttons on Hover */}
-                                           <div className="flex gap-2 mt-2">
+                                       <div className="absolute inset-0 bg-black/80 p-4 opacity-0 group-hover/card:opacity-100 transition-opacity flex flex-col justify-between text-center">
+                                           <div className="flex-1 flex items-center justify-center overflow-hidden">
+                                             <p className="text-xs text-slate-300 line-clamp-5">{frame.description}</p>
+                                           </div>
+
+                                           {/* Action Buttons on Hover - Always visible at bottom */}
+                                           <div className="flex gap-2 mt-2 flex-shrink-0">
                                               <button 
                                                   onClick={() => processFrames(index)}
                                                   disabled={isGeneratingFrames}
@@ -857,9 +952,34 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
                             </div>
 
                             {/* Footer */}
-                            <div className="px-3 py-2 text-[10px] text-slate-500 flex justify-between">
-                              <span>Target: {clip.targetDuration.toFixed(1)}s</span>
-                              <span>Speed: {clip.speedFactor.toFixed(2)}x</span>
+                            <div className="px-3 py-2 text-[10px] text-slate-500">
+                              <div className="flex justify-between mb-2">
+                                <span>Target: {clip.targetDuration.toFixed(1)}s</span>
+                                <span>Speed: {clip.speedFactor.toFixed(2)}x</span>
+                              </div>
+
+                              {/* Action Buttons */}
+                              {!isVideoGenerating && (
+                                <div className="flex gap-1 mt-2">
+                                  <button
+                                    onClick={() => regenerateSingleShot(index)}
+                                    className="flex-1 px-2 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded text-[9px] font-medium transition-colors flex items-center justify-center gap-1"
+                                    title="Regenerate this video"
+                                  >
+                                    <Video className="w-3 h-3" />
+                                    Regen
+                                  </button>
+                                  <button
+                                    onClick={() => reprocessSingleShot(index)}
+                                    disabled={!clip.generatedVideoUrl}
+                                    className="flex-1 px-2 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-[9px] font-medium transition-colors flex items-center justify-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title="Reprocess speed ramp"
+                                  >
+                                    <RefreshCw className="w-3 h-3" />
+                                    Process
+                                  </button>
+                                </div>
+                              )}
                             </div>
                           </div>
                         ))}
@@ -887,6 +1007,14 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
                         >
                           <Download className="w-4 h-4" /> Download Video
                         </a>
+                        <button
+                          onClick={() => stitchFinalVideo(videoClips)}
+                          disabled={isVideoGenerating}
+                          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition-colors disabled:opacity-50"
+                          title="Re-stitch video with current clips"
+                        >
+                          <RefreshCw className="w-4 h-4" /> Re-stitch
+                        </button>
                       </div>
                     </div>
                   )}

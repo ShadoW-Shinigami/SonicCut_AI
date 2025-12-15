@@ -49,9 +49,9 @@ export const generateVideoClip = async (
   const result = await fal.subscribe("fal-ai/kling-video/v2.5-turbo/pro/image-to-video", {
     input: {
       prompt: input.prompt,
-      image_url: `data:image/png;base64,${input.firstFrameBase64}`,
+      image_url: `data:image/jpeg;base64,${input.firstFrameBase64}`,
       tail_image_url: input.lastFrameBase64
-        ? `data:image/png;base64,${input.lastFrameBase64}`
+        ? `data:image/jpeg;base64,${input.lastFrameBase64}`
         : undefined,
       duration: input.duration,
       negative_prompt: input.negativePrompt || "blur, distort, and low quality",
@@ -98,13 +98,36 @@ export const calculateSpeedFactor = (
 };
 
 /**
- * Fetch a video from URL and return as Blob
+ * Fetch a video from URL and return as Blob with retry logic
  * Needed for FFmpeg processing
  */
-export const fetchVideoAsBlob = async (videoUrl: string): Promise<Blob> => {
-  const response = await fetch(videoUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch video: ${response.statusText}`);
+export const fetchVideoAsBlob = async (
+  videoUrl: string,
+  maxRetries: number = 3,
+  retryDelay: number = 2000
+): Promise<Blob> => {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const response = await fetch(videoUrl);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      return await response.blob();
+    } catch (error) {
+      lastError = error as Error;
+      console.warn(`Fetch attempt ${attempt + 1}/${maxRetries} failed:`, error);
+
+      // Don't wait after the last attempt
+      if (attempt < maxRetries - 1) {
+        // Exponential backoff: 2s, 4s, 8s...
+        const delay = retryDelay * Math.pow(2, attempt);
+        console.log(`Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
   }
-  return await response.blob();
+
+  throw new Error(`Failed to fetch video after ${maxRetries} attempts: ${lastError?.message}`);
 };

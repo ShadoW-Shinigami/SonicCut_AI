@@ -10,9 +10,11 @@ lerna-debug.log*
 # Claude and AI Studio files
 CLAUDE.md
 .claude/
+test_scripts/
 metadata.json
 *.plan.md
 plan*.md
+PRD.txt
 
 # Environment variables
 .env
