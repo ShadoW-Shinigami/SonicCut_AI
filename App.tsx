@@ -1,0 +1,381 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { AudioAnalysis, AudioState, Marker, OnsetData } from './types';
+import { analyzeAudioCreatively } from './services/geminiService';
+import { decodeAudio, computeOnsetEnvelope, generateMarkers, generateMarkersByCount } from './services/audioProcessingService';
+import Waveform from './components/Waveform';
+import FileUpload from './components/FileUpload';
+import VideoPlanner from './components/VideoPlanner';
+import { Music, Wand2, Download, Play, Pause, AlertCircle, Volume2, Mic2, Settings2, ChevronDown, ChevronUp, Activity } from 'lucide-react';
+
+const App: React.FC = () => {
+  // Application State
+  const [audioState, setAudioState] = useState<AudioState | null>(null);
+  const [analysis, setAnalysis] = useState<AudioAnalysis | null>(null);
+  const [markers, setMarkers] = useState<Marker[]>([]);
+  const [onsetData, setOnsetData] = useState<OnsetData | null>(null);
+  
+  // UI State
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  
+  // Advanced Controls
+  const [density, setDensity] = useState(0.5); 
+  const [minDuration, setMinDuration] = useState(2.0);
+  const [maxDuration, setMaxDuration] = useState(8.0);
+  
+  const [customCount, setCustomCount] = useState<string>("");
+  const [useCustomCount, setUseCustomCount] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [showLyrics, setShowLyrics] = useState(false);
+
+  // Refs
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const animationRef = useRef<number | null>(null);
+
+  // Handlers
+  const handleFileSelect = async (file: File) => {
+    setIsProcessing(true);
+    setErrorMsg(null);
+    setAudioState(null);
+    setAnalysis(null);
+    setMarkers([]);
+    
+    try {
+      const url = URL.createObjectURL(file);
+      const buffer = await decodeAudio(file);
+      
+      setAudioState({
+        file,
+        buffer,
+        duration: buffer.duration,
+        fileName: file.name,
+        url
+      });
+
+      const data = computeOnsetEnvelope(buffer);
+      setOnsetData(data);
+
+      const initialMarkers = generateMarkers(data, {
+          minDuration: 2.0,
+          maxDuration: 8.0,
+          sensitivity: 0.5
+      }, buffer.duration);
+      setMarkers(initialMarkers);
+
+      analyzeAudioCreatively(file).then(setAnalysis).catch(err => {
+        console.error("Gemini failed", err);
+      });
+
+    } catch (e) {
+      console.error(e);
+      setErrorMsg("Failed to process audio file. Please try another.");
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Regeneration Effect
+  useEffect(() => {
+    if (!onsetData || !audioState) return;
+
+    let newMarkers: Marker[] = [];
+    if (useCustomCount && customCount && !isNaN(parseInt(customCount))) {
+        // Now passing min/max constraints to the count generator!
+        newMarkers = generateMarkersByCount(
+            onsetData, 
+            parseInt(customCount), 
+            audioState.duration,
+            { minDuration, maxDuration }
+        );
+    } else {
+        newMarkers = generateMarkers(onsetData, {
+            minDuration,
+            maxDuration,
+            sensitivity: density
+        }, audioState.duration);
+    }
+    setMarkers(newMarkers);
+  }, [density, minDuration, maxDuration, useCustomCount, customCount, onsetData, audioState]);
+
+  // Audio Sync
+  useEffect(() => {
+    if (isPlaying && audioRef.current) {
+      const update = () => {
+        if (audioRef.current) {
+          setCurrentTime(audioRef.current.currentTime);
+          animationRef.current = requestAnimationFrame(update);
+        }
+      };
+      animationRef.current = requestAnimationFrame(update);
+    } else {
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    }
+    return () => {
+        if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    };
+  }, [isPlaying]);
+
+  const togglePlay = () => {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+    } else {
+      audioRef.current.play();
+    }
+    setIsPlaying(!isPlaying);
+  };
+
+  const handleSeek = (time: number) => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = time;
+      setCurrentTime(time);
+    }
+  };
+
+  const handleExport = () => {
+    const csvContent = "data:text/csv;charset=utf-8," 
+      + "Timestamp (Seconds),Type\n"
+      + markers.map(m => `${m.time.toFixed(4)},${m.type}`).join("\n");
+    
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `${audioState?.fileName || "audio"}_markers.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-indigo-500/30 pb-20">
+      
+      {/* Header */}
+      <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur sticky top-0 z-50">
+        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Music className="w-8 h-8 text-indigo-500" />
+            <h1 className="text-2xl font-bold tracking-tight bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
+              SonicCut AI
+            </h1>
+          </div>
+          {audioState && (
+             <button onClick={handleExport} className="btn-secondary flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-sm font-medium transition-colors">
+               <Download className="w-4 h-4" /> Export CSV
+             </button>
+          )}
+        </div>
+      </header>
+
+      <main className="max-w-6xl mx-auto px-6 py-12">
+        {errorMsg && (
+          <div className="mb-8 p-4 bg-red-900/20 border border-red-800 rounded-lg flex items-center gap-3 text-red-200">
+            <AlertCircle className="w-5 h-5" /> <p>{errorMsg}</p>
+          </div>
+        )}
+
+        {!audioState && (
+          <div className="max-w-xl mx-auto mt-20">
+            <FileUpload onFileSelect={handleFileSelect} isProcessing={isProcessing} />
+            <p className="text-center text-slate-500 mt-6 text-sm">Powered by Google Gemini 2.5 & Signal Processing</p>
+          </div>
+        )}
+
+        {audioState && (
+          <div className="space-y-8 animate-fade-in">
+            
+            {/* Analysis Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              <div className="col-span-1 md:col-span-4 bg-slate-900/50 border border-slate-800 rounded-2xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <Wand2 className="w-5 h-5 text-purple-400" />
+                    <h2 className="text-lg font-semibold">Creative Analysis</h2>
+                  </div>
+                  {analysis?.bpm || onsetData?.detectedBpm ? (
+                      <div className="flex items-center gap-2 bg-slate-950 px-3 py-1 rounded-full border border-slate-800">
+                          <Activity className="w-4 h-4 text-emerald-400" />
+                          <span className="text-sm font-mono text-emerald-400">
+                              ~{analysis?.bpm || onsetData?.detectedBpm} BPM
+                          </span>
+                      </div>
+                  ) : null}
+                </div>
+                
+                {!analysis ? (
+                   <div className="flex items-center gap-3 text-slate-400 animate-pulse">
+                     <div className="h-4 w-4 bg-slate-700 rounded-full"></div> Analyzing...
+                   </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div className="p-4 bg-slate-950 rounded-xl border border-slate-800/50">
+                        <label className="text-xs text-slate-500 uppercase tracking-wider">Genre</label>
+                        <p className="text-lg font-medium text-indigo-300">{analysis.genre}</p>
+                        </div>
+                        <div className="p-4 bg-slate-950 rounded-xl border border-slate-800/50">
+                        <label className="text-xs text-slate-500 uppercase tracking-wider">Theme</label>
+                        <p className="text-lg font-medium text-pink-300">{analysis.theme}</p>
+                        </div>
+                        <div className="p-4 bg-slate-950 rounded-xl border border-slate-800/50">
+                        <label className="text-xs text-slate-500 uppercase tracking-wider">Instruments</label>
+                        <div className="flex flex-wrap gap-2 mt-1">
+                            {analysis.instruments.map((inst, i) => (
+                            <span key={i} className="text-xs px-2 py-1 bg-slate-800 text-cyan-200 rounded-md border border-slate-700">{inst}</span>
+                            ))}
+                        </div>
+                        </div>
+                    </div>
+                    
+                    {/* Lyrics Section */}
+                    {analysis.lyrics && (
+                        <div className="border-t border-slate-800 pt-4">
+                            <button 
+                                onClick={() => setShowLyrics(!showLyrics)}
+                                className="flex items-center gap-2 text-sm text-slate-400 hover:text-slate-200 transition-colors w-full"
+                            >
+                                <Mic2 className="w-4 h-4" />
+                                {showLyrics ? "Hide Lyrics" : "Show Lyrics / Content"}
+                                {showLyrics ? <ChevronUp className="w-4 h-4 ml-auto" /> : <ChevronDown className="w-4 h-4 ml-auto" />}
+                            </button>
+                            {showLyrics && (
+                                <div className="mt-4 p-4 bg-slate-950 rounded-xl border border-slate-800/50 text-slate-300 text-sm whitespace-pre-wrap leading-relaxed max-h-60 overflow-y-auto">
+                                    {analysis.lyrics}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Waveform */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+               <div className="flex items-center justify-between mb-4">
+                 <h2 className="text-lg font-semibold flex items-center gap-2">
+                    <Volume2 className="w-5 h-5 text-slate-400" /> Timeline
+                 </h2>
+                 <span className="text-xs font-mono text-slate-500 bg-slate-950 px-2 py-1 rounded">
+                    {currentTime.toFixed(2)}s / {audioState.duration.toFixed(2)}s
+                 </span>
+               </div>
+               <div className="mb-6 relative group">
+                  <Waveform buffer={audioState.buffer!} markers={markers} currentTime={currentTime} onSeek={handleSeek} />
+                  <div className="absolute top-2 right-2 text-[10px] text-slate-400 bg-slate-950/80 px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">Click waveform to seek</div>
+               </div>
+               <div className="flex justify-center">
+                  <button onClick={togglePlay} className="flex items-center justify-center w-14 h-14 bg-indigo-600 hover:bg-indigo-500 rounded-full shadow-lg shadow-indigo-900/50 transition-all hover:scale-105">
+                    {isPlaying ? <Pause className="fill-white" /> : <Play className="fill-white ml-1" />}
+                  </button>
+               </div>
+               <audio ref={audioRef} src={audioState.url} onEnded={() => setIsPlaying(false)} className="hidden" />
+            </div>
+
+            {/* Controls */}
+            <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6">
+                <div className="flex items-center gap-2 mb-6">
+                    <Settings2 className="w-5 h-5 text-indigo-400" />
+                    <h3 className="font-semibold text-slate-200">Cut Configuration</h3>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
+                    {/* Logic Controls */}
+                    <div className="space-y-6">
+                        
+                        {/* Sensitivity */}
+                        <div className={`transition-opacity duration-300 ${useCustomCount ? 'opacity-40 pointer-events-none' : 'opacity-100'}`}>
+                            <div className="flex justify-between mb-2">
+                                <label className="text-sm font-medium text-slate-300">Beat Sensitivity</label>
+                                <span className="text-xs text-indigo-400 font-mono">
+                                    {useCustomCount ? 'AUTO' : `${(density * 100).toFixed(0)}%`}
+                                </span>
+                            </div>
+                            <input 
+                                type="range" 
+                                min="0" 
+                                max="1" 
+                                step="0.05" 
+                                value={density} 
+                                onChange={(e) => setDensity(parseFloat(e.target.value))} 
+                                disabled={useCustomCount}
+                                className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
+                            />
+                            <div className="flex justify-between text-[10px] text-slate-500 mt-1">
+                                <span>Sparse (Major Drops)</span>
+                                <span>Dense (All Beats)</span>
+                            </div>
+                        </div>
+
+                        {/* Min Duration */}
+                        <div>
+                             <div className="flex justify-between mb-2">
+                                <label className="text-sm font-medium text-slate-300">Min Cut Duration</label>
+                                <span className="text-xs text-indigo-400 font-mono">{minDuration}s</span>
+                            </div>
+                            <input type="range" min="0.5" max="5.0" step="0.1" value={minDuration} onChange={(e) => {
+                                const val = parseFloat(e.target.value);
+                                setMinDuration(val);
+                                if (val > maxDuration) setMaxDuration(val);
+                            }} className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-500" />
+                        </div>
+
+                        {/* Max Duration */}
+                        <div>
+                             <div className="flex justify-between mb-2">
+                                <label className="text-sm font-medium text-slate-300">Max Duration (Safety Net)</label>
+                                <span className="text-xs text-rose-400 font-mono">{maxDuration}s</span>
+                            </div>
+                            <input type="range" min="2.0" max="30.0" step="0.5" value={maxDuration} onChange={(e) => {
+                                const val = parseFloat(e.target.value);
+                                setMaxDuration(val);
+                                if (val < minDuration) setMinDuration(val);
+                            }} className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-rose-500" />
+                        </div>
+                    </div>
+
+                    {/* Custom & Stats */}
+                    <div className="border-l border-slate-800 pl-0 lg:pl-12 flex flex-col justify-center space-y-8">
+                         <div>
+                             <div className="flex items-center gap-2 mb-3">
+                                <input type="checkbox" id="useCustom" checked={useCustomCount} onChange={(e) => setUseCustomCount(e.target.checked)} className="w-4 h-4 rounded border-slate-700 bg-slate-800 text-indigo-500 focus:ring-indigo-500" />
+                                <label htmlFor="useCustom" className="text-sm font-medium text-slate-300 cursor-pointer">Override with Target Count</label>
+                            </div>
+                            <input type="number" placeholder="e.g. 24" value={customCount} onChange={(e) => setCustomCount(e.target.value)} disabled={!useCustomCount} className="w-full bg-slate-950 border border-slate-700 text-slate-100 rounded-lg px-4 py-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none disabled:opacity-50" />
+                            <p className="text-[10px] text-slate-500 mt-2">Targeting exact count will still respect Min/Max constraints.</p>
+                         </div>
+
+                         <div className="bg-slate-950 border border-slate-800 rounded-xl p-6 flex flex-col items-center">
+                            <span className="text-4xl font-bold text-indigo-400">{markers.length}</span>
+                            <span className="text-xs text-slate-500 uppercase mt-1">Total Cuts Generated</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* Marker Preview */}
+            <div className="mt-8">
+               <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Markers ({markers.length})</h3>
+               <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                  {markers.map((m) => (
+                      <div key={m.id} onClick={() => handleSeek(m.time)} className={`cursor-pointer p-2 rounded border text-center transition-colors ${m.type === 'Safety' ? 'bg-rose-950/30 border-rose-900/50 hover:bg-rose-900/50' : 'bg-amber-950/30 border-amber-900/50 hover:bg-amber-900/50'}`}>
+                          <div className={`text-xs font-bold ${m.type === 'Safety' ? 'text-rose-400' : 'text-amber-400'}`}>{m.type}</div>
+                          <div className="text-sm font-mono text-slate-300">{m.time.toFixed(2)}s</div>
+                      </div>
+                  ))}
+               </div>
+            </div>
+
+            {/* PHASE 2 & 3: Video Planner */}
+            {analysis && markers.length > 0 && (
+                <VideoPlanner analysis={analysis} markers={markers} audioDuration={audioState.duration} />
+            )}
+
+          </div>
+        )}
+      </main>
+    </div>
+  );
+};
+
+export default App;
