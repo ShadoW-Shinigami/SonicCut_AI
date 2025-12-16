@@ -56,7 +56,7 @@ export const generateVideoClip = async (
       duration: input.duration,
       negative_prompt: input.negativePrompt || "blur, distort, and low quality",
       cfg_scale: input.cfgScale ?? 0.5
-    },
+    } as any,
     logs: true,
     onQueueUpdate: (update) => {
       if (onProgress) {

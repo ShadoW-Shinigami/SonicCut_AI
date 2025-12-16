@@ -3,21 +3,51 @@ import { AudioAnalysis, Marker, AspectRatio, VideoPlan, StoryboardFrame, Charact
 import { generateVideoNarrative, generateCharacterSheet, generateFirstFrame, generateNextFrame, sanitizePrompt } from '../services/geminiService';
 import { generateVideoClip, selectVideoDuration, calculateSpeedFactor, fetchVideoAsBlob } from '../services/klingService';
 import { generateBlackFrame, applySpeedRamp, stitchVideos, getFFmpeg, isFFmpegLoaded, createVideoUrl, revokeVideoUrl } from '../services/videoProcessingService';
-import { Clapperboard, Film, User, Loader2, PlaySquare, ArrowRight, LayoutTemplate, Package, StopCircle, RefreshCw, PlayCircle, AlertTriangle, Video, Download, Pause, Play } from 'lucide-react';
+import { Clapperboard, Film, User, Loader2, PlaySquare, ArrowRight, LayoutTemplate, Package, StopCircle, RefreshCw, PlayCircle, AlertTriangle, Video, Download, Pause, Play, X, MessageSquare } from 'lucide-react';
 import JSZip from 'jszip';
 
 interface VideoPlannerProps {
   analysis: AudioAnalysis;
   markers: Marker[];
   audioDuration: number;
+  // Phase 2 state (controlled by parent)
+  aspectRatio: AspectRatio;
+  setAspectRatio: (ratio: AspectRatio) => void;
+  visualStyle: string;
+  setVisualStyle: (style: string) => void;
+  videoPlan: VideoPlan | null;
+  setVideoPlan: (plan: VideoPlan | null) => void;
+  storyboard: StoryboardFrame[];
+  setStoryboard: (frames: StoryboardFrame[]) => void;
+  // Phase 3 state (controlled by parent)
+  videoClips: VideoClip[];
+  setVideoClips: (clips: VideoClip[]) => void;
+  finalVideoBlob: Blob | null;
+  setFinalVideoBlob: (blob: Blob | null) => void;
+  onStoryboardUpdate?: () => Promise<void>;
 }
 
-const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDuration }) => {
-  // State
-  const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9');
-  const [visualStyle, setVisualStyle] = useState<string>("Cinematic, High Contrast, Neo-Noir");
-  const [plan, setPlan] = useState<VideoPlan | null>(null);
-  const [storyboard, setStoryboard] = useState<StoryboardFrame[]>([]);
+const VideoPlanner: React.FC<VideoPlannerProps> = ({
+  analysis,
+  markers,
+  audioDuration,
+  aspectRatio,
+  setAspectRatio,
+  visualStyle,
+  setVisualStyle,
+  videoPlan,
+  setVideoPlan,
+  storyboard,
+  setStoryboard,
+  videoClips,
+  setVideoClips,
+  finalVideoBlob,
+  setFinalVideoBlob,
+  onStoryboardUpdate
+}) => {
+  // Rename plan to videoPlan for consistency with props
+  const plan = videoPlan;
+  const setPlan = setVideoPlan;
 
   // Loading States
   const [isPlanning, setIsPlanning] = useState(false);
@@ -25,11 +55,15 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
   const [isGeneratingFrames, setIsGeneratingFrames] = useState(false);
   const [generationProgress, setGenerationProgress] = useState(0);
 
+  // Feedback Dialog State
+  const [showFeedbackDialog, setShowFeedbackDialog] = useState(false);
+  const [feedbackText, setFeedbackText] = useState('');
+
   // Stop Control
   const stopRef = useRef<boolean>(false);
 
-  // Phase 3: Video Generation State
-  const [videoClips, setVideoClips] = useState<VideoClip[]>([]);
+  // Phase 3: Video Generation State (UI only)
+  // videoClips and finalVideoBlob are now controlled by parent
   const [videoState, setVideoState] = useState<VideoGenerationState>({
     clips: [],
     isGenerating: false,
@@ -43,6 +77,26 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
   const [clipVideoUrls, setClipVideoUrls] = useState<{ [key: string]: string }>({});
   const videoStopRef = useRef<boolean>(false);
 
+  // Recreate blob URLs from saved blobs on mount/load
+  useEffect(() => {
+    // Recreate final video URL from blob
+    if (finalVideoBlob && !finalVideoUrl) {
+      const url = createVideoUrl(finalVideoBlob);
+      setFinalVideoUrl(url);
+    }
+
+    // Recreate clip URLs from blobs
+    const newClipUrls: { [key: string]: string } = {};
+    videoClips.forEach(clip => {
+      if (clip.processedVideoBlob && !clipVideoUrls[clip.id]) {
+        newClipUrls[clip.id] = createVideoUrl(clip.processedVideoBlob);
+      }
+    });
+    if (Object.keys(newClipUrls).length > 0) {
+      setClipVideoUrls(prev => ({ ...prev, ...newClipUrls }));
+    }
+  }, [finalVideoBlob, videoClips]);
+
   // Step 1: Generate Plan (Text & Characters)
   const handleGeneratePlan = async () => {
     if (markers.length === 0) {
@@ -52,7 +106,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
     setIsPlanning(true);
     try {
       const videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio);
-      
+
       // Inject time from markers
       const scenesWithTime = videoPlan.scenes.map((scene, idx) => ({
           ...scene,
@@ -76,10 +130,55 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
     }
   };
 
+  const handleRegeneratePlan = async () => {
+    // Check if storyboard has any generated frames
+    const hasGeneratedFrames = storyboard.some(f => f.imageUrl);
+
+    if (hasGeneratedFrames) {
+      const confirmed = window.confirm(
+        "Regenerating the narrative will reset all storyboard frames. This action cannot be undone. Continue?"
+      );
+      if (!confirmed) return;
+    }
+
+    // Show feedback dialog
+    setFeedbackText(''); // Reset feedback
+    setShowFeedbackDialog(true);
+  };
+
+  const performRegeneratePlan = async (feedback?: string) => {
+    setShowFeedbackDialog(false);
+    setIsPlanning(true);
+    try {
+      const videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio, feedback);
+
+      // Inject time from markers
+      const scenesWithTime = videoPlan.scenes.map((scene, idx) => ({
+          ...scene,
+          markerId: markers[idx].id,
+          startTime: markers[idx].time,
+          imageUrl: undefined,
+          isGenerating: false
+      }));
+
+      setPlan({ ...videoPlan, scenes: scenesWithTime });
+      setStoryboard(scenesWithTime);
+
+      // Trigger character generation immediately after plan is ready
+      generateCharacters(videoPlan.characters);
+
+    } catch (e) {
+      console.error(e);
+      alert("Failed to regenerate video plan.");
+    } finally {
+      setIsPlanning(false);
+    }
+  };
+
   const generateCharacters = async (chars: Character[]) => {
     setIsGeneratingChars(true);
     const updatedChars = [...chars];
-    
+
     for (let i = 0; i < updatedChars.length; i++) {
         try {
             const base64 = await generateCharacterSheet(updatedChars[i], visualStyle);
@@ -90,6 +189,23 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
             console.error(`Failed to generate char ${updatedChars[i].name}`, e);
         }
     }
+    setIsGeneratingChars(false);
+  };
+
+  const regenerateCharacter = async (charIndex: number) => {
+    if (!plan) return;
+
+    setIsGeneratingChars(true);
+    const updatedChars = [...plan.characters];
+
+    try {
+      const base64 = await generateCharacterSheet(updatedChars[charIndex], visualStyle);
+      updatedChars[charIndex].imageUrl = base64;
+      setPlan({ ...plan, characters: updatedChars });
+    } catch (e) {
+      console.error(`Failed to regenerate char ${updatedChars[charIndex].name}`, e);
+    }
+
     setIsGeneratingChars(false);
   };
 
@@ -158,6 +274,11 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
 
         setGenerationProgress(((i + 1) / frames.length) * 100);
         setStoryboard([...frames]);
+
+        // Trigger autosave after each frame
+        if (onStoryboardUpdate) {
+          await onStoryboardUpdate();
+        }
     }
 
     setIsGeneratingFrames(false);
@@ -463,6 +584,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
       }
 
       setFinalVideoUrl(url);
+      setFinalVideoBlob(finalBlob); // Save blob to parent state for persistence
       setVideoState(prev => ({
         ...prev,
         currentPhase: 'complete',
@@ -652,7 +774,17 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                   {/* Narrative */}
                   <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-6">
-                      <h3 className="text-lg font-semibold text-slate-200 mb-2">Narrative Arc</h3>
+                      <div className="flex items-center justify-between mb-2">
+                        <h3 className="text-lg font-semibold text-slate-200">Narrative Arc</h3>
+                        <button
+                          onClick={handleRegeneratePlan}
+                          disabled={isPlanning || isGeneratingFrames}
+                          className="p-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Regenerate narrative"
+                        >
+                          <RefreshCw className={`w-4 h-4 text-pink-400 ${isPlanning ? 'animate-spin' : ''}`} />
+                        </button>
+                      </div>
                       <p className="text-slate-400 leading-relaxed text-sm">{plan.narrativeSummary}</p>
                       
                       <div className="mt-6 flex flex-wrap items-center gap-4">
@@ -706,9 +838,9 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
                           {isGeneratingChars && <Loader2 className="w-4 h-4 text-pink-400 animate-spin" />}
                       </div>
                       <div className="space-y-4 max-h-[300px] overflow-y-auto pr-2">
-                          {plan.characters.map((char) => (
+                          {plan.characters.map((char, charIndex) => (
                               <div key={char.id} className="flex gap-3 items-start bg-slate-950 p-3 rounded-lg border border-slate-800">
-                                  <div className="w-12 h-12 bg-slate-900 rounded-md flex-shrink-0 overflow-hidden border border-slate-700">
+                                  <div className="w-12 h-12 bg-slate-900 rounded-md flex-shrink-0 overflow-hidden border border-slate-700 relative">
                                       {char.imageUrl ? (
                                           <img src={`data:image/jpeg;base64,${char.imageUrl}`} alt={char.name} className="w-full h-full object-cover" />
                                       ) : (
@@ -717,10 +849,19 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
                                           </div>
                                       )}
                                   </div>
-                                  <div>
+                                  <div className="flex-1">
                                       <div className="text-sm font-medium text-slate-200">{char.name}</div>
                                       <div className="text-xs text-slate-500 line-clamp-2">{char.description}</div>
                                   </div>
+                                  {/* Generate/Regenerate button - always visible */}
+                                  <button
+                                      onClick={() => regenerateCharacter(charIndex)}
+                                      disabled={isGeneratingChars}
+                                      className="p-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                                      title={char.imageUrl ? "Regenerate character" : "Generate character"}
+                                  >
+                                      <RefreshCw className="w-3 h-3 text-pink-400" />
+                                  </button>
                               </div>
                           ))}
                       </div>
@@ -1030,6 +1171,55 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
                 </div>
               )}
           </div>
+      )}
+
+      {/* Feedback Dialog Modal */}
+      {showFeedbackDialog && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-2xl w-full p-6 animate-fade-in">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <MessageSquare className="w-5 h-5 text-pink-400" />
+                <h3 className="text-lg font-semibold text-slate-200">Provide Feedback (Optional)</h3>
+              </div>
+              <button
+                onClick={() => setShowFeedbackDialog(false)}
+                className="p-2 hover:bg-slate-800 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5 text-slate-400" />
+              </button>
+            </div>
+
+            <p className="text-sm text-slate-400 mb-4">
+              Tell the AI what you'd like to change or improve in the narrative. Be specific about characters, scenes, themes, or style. Leave blank to regenerate without guidance.
+            </p>
+
+            <textarea
+              value={feedbackText}
+              onChange={(e) => setFeedbackText(e.target.value)}
+              placeholder="e.g., 'Make it more cyberpunk themed', 'Add a car chase scene', 'Less abstract, more literal', 'Include a sunset in the final scene'..."
+              className="w-full h-32 bg-slate-950 border border-slate-700 text-slate-100 rounded-lg px-4 py-3 focus:ring-2 focus:ring-pink-500 focus:outline-none resize-none"
+            />
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => performRegeneratePlan(feedbackText.trim() || undefined)}
+                disabled={isPlanning}
+                className="flex-1 px-6 py-3 bg-pink-600 hover:bg-pink-500 text-white rounded-lg font-semibold shadow-lg shadow-pink-900/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isPlanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                {isPlanning ? "Regenerating..." : "Regenerate Narrative"}
+              </button>
+              <button
+                onClick={() => setShowFeedbackDialog(false)}
+                disabled={isPlanning}
+                className="px-6 py-3 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg font-semibold transition-all disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
     </div>

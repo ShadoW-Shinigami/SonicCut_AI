@@ -131,7 +131,8 @@ export const analyzeAudioCreatively = async (file: File): Promise<AudioAnalysis>
 export const generateVideoNarrative = async (
   analysis: AudioAnalysis,
   cutCount: number,
-  aspectRatio: AspectRatio
+  aspectRatio: AspectRatio,
+  userFeedback?: string
 ): Promise<VideoPlan> => {
   const ai = new GoogleGenAI({ apiKey: getApiKey() });
 
@@ -172,6 +173,10 @@ export const generateVideoNarrative = async (
     required: ["narrativeSummary", "characters", "scenes"]
   };
 
+  const feedbackSection = userFeedback
+    ? `\n\nUser Feedback/Direction: ${userFeedback}\nPlease incorporate this feedback into the narrative plan.`
+    : '';
+
   const prompt = `
     Plan a music video for a song with the following details:
     Theme: ${analysis.theme}
@@ -185,7 +190,7 @@ export const generateVideoNarrative = async (
     4. The narrative should flow smoothly, designed for morphing/interpolation between shots.
     5. Define the characters needed and assign them unique IDs.
     6. For each scene, you MUST list the 'characterIds' of any characters present.
-    7. Output JSON.
+    7. Output JSON.${feedbackSection}
   `;
 
   const response = await ai.models.generateContent({
@@ -232,7 +237,7 @@ export const generateCharacterSheet = async (
         aspectRatio: "1:1",
 		imageSize: "2K",
 		output_mime_type: "image/jpeg"
-      }
+      } as any
     }
   });
 
@@ -301,7 +306,7 @@ export const generateFirstFrame = async (
         aspectRatio: getSupportedAspectRatio(aspectRatio),
         imageSize: "2K",
 		output_mime_type: "image/jpeg"
-      }
+      } as any
     }
   });
 
@@ -429,7 +434,7 @@ export const generateNextFrame = async (
           aspectRatio: getSupportedAspectRatio(aspectRatio),
 		  imageSize: "2K",
 		  output_mime_type: "image/jpeg"
-      }
+      } as any
     }
   });
 

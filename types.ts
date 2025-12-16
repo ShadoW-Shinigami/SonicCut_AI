@@ -88,3 +88,48 @@ export interface VideoGenerationState {
   progress: number;
   currentPhase: 'idle' | 'generating' | 'processing' | 'stitching' | 'complete';
 }
+
+// Project Management Types
+
+export interface ProjectData {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+
+  // Phase 1 Data
+  audioFileName: string;
+  audioDuration: number;
+  audioBlob?: Blob;
+  analysis: AudioAnalysis | null;
+  markers: Marker[];
+  onsetData: OnsetData | null;
+  density: number;
+  minDuration: number;
+  maxDuration: number;
+  customCount: string;
+  useCustomCount: boolean;
+
+  // Phase 2 Data
+  aspectRatio?: AspectRatio;
+  visualStyle?: string;
+  videoPlan?: VideoPlan | null;
+  storyboard?: StoryboardFrame[];
+
+  // Phase 3 Data
+  videoClips?: VideoClip[];
+  finalVideoBlob?: Blob;
+}
+
+export interface ProjectMetadata {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  audioFileName: string;
+  markerCount: number;
+  hasStoryboard: boolean;
+  hasVideo: boolean;
+}
+
+export type StorageBackend = 'filesystem' | 'indexeddb' | 'none';
