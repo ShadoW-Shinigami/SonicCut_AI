@@ -672,61 +672,57 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
 
     // Pipelined generation + processing
     const CONCURRENT_GENERATIONS = 2;
-    const CONCURRENT_PROCESSING = 1; // FFmpeg is heavy, keep at 1
 
     // Processing queue
     const processingQueue: number[] = [];
-    let activeProcessing = 0;
+    let isProcessing = false;
     let generatedCount = 0;
     let processedCount = 0;
 
-    // Process next clip in queue
-    const processNextClip = async () => {
-      if (processingQueue.length === 0 || videoStopRef.current) return;
+    // Process clips from queue sequentially
+    const processQueuedClips = async () => {
+      if (isProcessing) return; // Already processing
+      isProcessing = true;
 
-      activeProcessing++;
-      const clipIndex = processingQueue.shift()!;
+      while (processingQueue.length > 0 && !videoStopRef.current) {
+        const clipIndex = processingQueue.shift()!;
 
-      try {
-        clips[clipIndex].status = 'processing';
-        setVideoClips([...clips]);
+        try {
+          clips[clipIndex].status = 'processing';
+          setVideoClips([...clips]);
 
-        // Fetch video as blob
-        const videoBlob = await fetchVideoAsBlob(clips[clipIndex].generatedVideoUrl!);
+          // Fetch video as blob
+          const videoBlob = await fetchVideoAsBlob(clips[clipIndex].generatedVideoUrl!);
 
-        // Apply speed ramp
-        const processedBlob = await applySpeedRamp(
-          videoBlob,
-          clips[clipIndex].speedFactor
-        );
+          // Apply speed ramp (FFmpeg - must be serialized)
+          const processedBlob = await applySpeedRamp(
+            videoBlob,
+            clips[clipIndex].speedFactor
+          );
 
-        clips[clipIndex].processedVideoBlob = processedBlob;
-        clips[clipIndex].status = 'ready';
+          clips[clipIndex].processedVideoBlob = processedBlob;
+          clips[clipIndex].status = 'ready';
 
-        // Create URL for preview
-        const previewUrl = createVideoUrl(processedBlob);
-        setClipVideoUrls(prev => ({ ...prev, [clips[clipIndex].id]: previewUrl }));
+          // Create URL for preview
+          const previewUrl = createVideoUrl(processedBlob);
+          setClipVideoUrls(prev => ({ ...prev, [clips[clipIndex].id]: previewUrl }));
 
-        processedCount++;
-        setVideoClips([...clips]);
+          processedCount++;
+          setVideoClips([...clips]);
 
-        // Update progress (generation 50%, processing 50%)
-        const totalProgress = (generatedCount / clips.length) * 50 + (processedCount / clips.length) * 50;
-        setVideoState(prev => ({ ...prev, progress: totalProgress }));
+          // Update progress (generation 50%, processing 50%)
+          const totalProgress = (generatedCount / clips.length) * 50 + (processedCount / clips.length) * 50;
+          setVideoState(prev => ({ ...prev, progress: totalProgress }));
 
-      } catch (e) {
-        console.error(`Speed processing failed for shot ${clipIndex + 1}:`, e);
-        clips[clipIndex].status = 'error';
-        clips[clipIndex].error = `Speed processing failed: ${(e as Error).message}`;
-        setVideoClips([...clips]);
+        } catch (e) {
+          console.error(`Speed processing failed for shot ${clipIndex + 1}:`, e);
+          clips[clipIndex].status = 'error';
+          clips[clipIndex].error = `Speed processing failed: ${(e as Error).message}`;
+          setVideoClips([...clips]);
+        }
       }
 
-      activeProcessing--;
-
-      // Process next in queue if available
-      if (processingQueue.length > 0 && activeProcessing < CONCURRENT_PROCESSING) {
-        processNextClip();
-      }
+      isProcessing = false;
     };
 
     // Step 1: Generate videos with immediate processing
@@ -776,11 +772,9 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
             success = true;
             generatedCount++;
 
-            // Add to processing queue immediately
+            // Add to processing queue and start processing if not already running
             processingQueue.push(clipIndex);
-            if (activeProcessing < CONCURRENT_PROCESSING) {
-              processNextClip();
-            }
+            processQueuedClips(); // Will return immediately if already processing
 
             break; // Success, exit retry loop
           } catch (e) {
@@ -800,7 +794,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
     }
 
     // Wait for all processing to complete
-    while (activeProcessing > 0 || processingQueue.length > 0) {
+    while (isProcessing || processingQueue.length > 0) {
       if (videoStopRef.current) break;
       await new Promise(resolve => setTimeout(resolve, 100));
     }
