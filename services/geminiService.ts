@@ -181,6 +181,7 @@ export const generateVideoNarrative = async (
   analysis: AudioAnalysis,
   cutCount: number,
   aspectRatio: AspectRatio,
+  conceptualMode: boolean = false,
   userFeedback?: string
 ): Promise<VideoPlan> => {
   const ai = new GoogleGenAI({ apiKey: getApiKey() });
@@ -246,7 +247,7 @@ export const generateVideoNarrative = async (
     ? `\n\nUser Feedback/Direction: ${userFeedback}\nPlease incorporate this feedback into the narrative plan.`
     : '';
 
-  const prompt = `Plan a music video for a song with exactly ${cutCount} shots.
+  const literalPrompt = `Plan a music video for a song with exactly ${cutCount} shots.
 
 Theme: ${analysis.theme}
 Genre: ${analysis.genre}
@@ -260,6 +261,75 @@ Requirements:
 5. No dialogue, pure visual storytelling
 6. Flow smoothly, designed for morphing/interpolation between shots
 7. Output JSON.${feedbackSection}`;
+
+  const conceptualPrompt = `You are an award-winning music video director known for creating visually stunning, conceptually rich music videos. Your work embodies the emotional and thematic essence of songs through symbolic imagery, atmosphere, and visual poetry.
+
+SONG ANALYSIS:
+Theme: ${analysis.theme}
+Genre: ${analysis.genre}
+Lyrics: ${analysis.lyrics}
+
+CREATIVE DIRECTION - Think in Steps:
+
+Step 1 - Extract the Essence:
+- What is the emotional CORE of this song? (not what lyrics say, but what they FEEL)
+- What are 2-3 key themes or concepts?
+- Are there major character references or concepts in the lyrics that should be represented?
+- Remember: Not every story needs a happy ending. If the song is dark, hopeless, or tragic, let the visual narrative embrace that. Match the emotional truth.
+
+Step 2 - Define Visual Motifs:
+- Choose 2-3 recurring visual symbols that represent the themes
+- These will appear in different forms throughout to create cohesion
+- Examples: mirrors for fractured identity, empty spaces for loneliness, water for transformation, light/shadow for duality
+
+Step 3 - Create the Visual Narrative:
+- Design exactly ${cutCount} shots that embody the song's spirit
+- NEVER literally depict lyric lines - create a parallel visual story
+- Focus on: atmosphere, symbolic imagery, cinematography, emotional states
+- Characters defined by their EMOTIONAL JOURNEY and TRANSFORMATION, not literal activities
+
+INSPIRATION - Music Videos That Embody This Approach:
+
+Narrative but NOT literal to lyrics:
+- Taylor Swift "Anti-Hero" - surreal self-loathing narrative, not depicting literal scenarios
+- The Weeknd "Blinding Lights" - night drive narrative captures feeling, not lyric events
+- Lorde "Green Light" - post-breakup euphoria through dance/movement, not literal story
+- Daft Punk "Instant Crush" - mannequin love story (completely metaphorical)
+- Johnny Cash "Hurt" - parallel narrative of aging/regret, not literal lyric depiction
+
+Symbolic/Atmospheric:
+- Hozier "Take Me To Church" - religious symbolism representing oppression (not church story)
+- Childish Gambino "This Is America" - symbolic social commentary through metaphor
+- Radiohead "Karma Police" - surreal, dreamlike atmosphere over narrative clarity
+- Björk "All Is Full of Love" - abstract robotic imagery (pure symbolism)
+- Massive Attack "Teardrop" - in-utero imagery representing birth/creation
+
+Highly Conceptual/Abstract:
+- Arctic Monkeys "Do I Wanna Know" - abstract soundwave animation (zero literal interpretation)
+- FKA twigs "Cellophane" - interpretive performance art embodying vulnerability
+- OK Go "This Too Shall Pass" - Rube Goldberg machine (pure creative spectacle)
+- Nine Inch Nails "Closer" - disturbing symbolic imagery representing obsession
+- Sia "Chandelier" - dance representing struggle and performance anxiety
+
+CRITICAL REQUIREMENTS:
+1. Exactly ${cutCount} shots - CRITICAL: Generate exactly ${cutCount} shots, no more, no less
+2. NEVER be literal to lyrics - always work symbolically, atmospherically, conceptually
+3. Define characters with objective physical descriptions (gender, age, ethnicity, hair, outfit)
+   - Emphasize their EMOTIONAL STATE and psychological transformation
+   - Good: "Young woman embodying isolation and yearning, gradual transformation toward defiance"
+   - Bad: "Woman walks to coffee shop, orders drink, sits down"
+4. Define locations with detailed environmental descriptions (architecture, environment, spatial layout)
+   - Locations can be symbolic/metaphorical spaces, not just realistic settings
+5. Each shot: list characterIds AND locationIds (both arrays)
+6. Interpolation prompts focus on TRANSITIONS and VISUAL FLOW:
+   - Camera movements, lighting shifts, atmospheric changes, visual rhythm
+   - Be creative and artistic, not rigid
+   - Good: "Dissolve through refracted light, space contracts, warm amber to cold steel blue"
+   - Good: "Slow rotation revealing hidden perspective, shadows lengthen, silence becomes visible"
+7. In narrativeSummary, mention the recurring visual motifs you've chosen and their symbolic meaning
+8. Output JSON${feedbackSection}`;
+
+  const prompt = conceptualMode ? conceptualPrompt : literalPrompt;
 
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",

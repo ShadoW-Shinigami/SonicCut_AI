@@ -157,6 +157,7 @@ export interface ProjectData {
   // Phase 2 Data
   aspectRatio?: AspectRatio;
   visualStyle?: string;
+  narrativeMode?: 'literal' | 'conceptual';  // Narrative generation mode
   videoPlan?: VideoPlan | null;
   storyboard?: StoryboardFrame[];
   hierarchyTree?: HierarchyTree | null;  // Optional hierarchy data

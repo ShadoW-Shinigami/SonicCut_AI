@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 import { saveProject, loadProject, generateProjectName, renameProject as renameProjectService } from '../services/projectStorageService';
-import { AudioState, AudioAnalysis, Marker, OnsetData, AspectRatio, VideoPlan, StoryboardFrame, VideoClip } from '../types';
+import { AudioState, AudioAnalysis, Marker, OnsetData, AspectRatio, VideoPlan, StoryboardFrame, VideoClip, HierarchyTree } from '../types';
 
 interface UseProjectAutosaveOptions {
   enabled: boolean;
@@ -23,6 +23,9 @@ interface UseProjectAutosaveOptions {
   visualStyle?: string;
   videoPlan?: VideoPlan | null;
   storyboard?: StoryboardFrame[];
+  hierarchyTree?: HierarchyTree | null;
+  useHierarchy?: boolean;
+  useConceptualMode?: boolean;
 
   // Phase 3 State
   videoClips?: VideoClip[];
@@ -91,8 +94,10 @@ export const useProjectAutosave = (options: UseProjectAutosaveOptions): UseProje
 
         aspectRatio: opts.aspectRatio,
         visualStyle: opts.visualStyle,
+        narrativeMode: opts.useConceptualMode ? 'conceptual' : 'literal',
         videoPlan: opts.videoPlan,
         storyboard: opts.storyboard,
+        hierarchyTree: opts.hierarchyTree,
 
         // Phase 3 Data
         videoClips: opts.videoClips,
@@ -140,6 +145,7 @@ export const useProjectAutosave = (options: UseProjectAutosaveOptions): UseProje
       useCustomCount: options.useCustomCount,
       aspectRatio: options.aspectRatio,
       visualStyle: options.visualStyle,
+      useConceptualMode: options.useConceptualMode,
       videoPlanExists: !!options.videoPlan,
       storyboardCount: options.storyboard?.length || 0,
       videoClipsCount: options.videoClips?.length || 0,

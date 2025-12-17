@@ -26,6 +26,9 @@ interface VideoPlannerProps {
   setHierarchyTree: (tree: HierarchyTree | null) => void;
   useHierarchy: boolean;
   setUseHierarchy: (use: boolean) => void;
+  // Narrative mode (controlled by parent)
+  useConceptualMode: boolean;
+  setUseConceptualMode: (use: boolean) => void;
   // Phase 3 state (controlled by parent)
   videoClips: VideoClip[];
   setVideoClips: (clips: VideoClip[]) => void;
@@ -50,6 +53,8 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
   setHierarchyTree,
   useHierarchy,
   setUseHierarchy,
+  useConceptualMode,
+  setUseConceptualMode,
   videoClips,
   setVideoClips,
   finalVideoBlob,
@@ -119,7 +124,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
     }
     setIsPlanning(true);
     try {
-      let videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio);
+      let videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio, useConceptualMode);
 
       // Auto-fix shot count mismatch
       if (videoPlan.scenes.length !== markers.length) {
@@ -199,7 +204,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
     setShowFeedbackDialog(false);
     setIsPlanning(true);
     try {
-      let videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio, feedback);
+      let videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio, useConceptualMode, feedback);
 
       // Auto-fix shot count mismatch
       if (videoPlan.scenes.length !== markers.length) {
@@ -1094,7 +1099,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
                  </div>
               </div>
 
-              <div className="mb-6 w-full max-w-2xl">
+              <div className="mb-6 w-full max-w-2xl space-y-4">
                 <label className="flex items-center gap-3 cursor-pointer">
                   <input
                     type="checkbox"
@@ -1105,6 +1110,19 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
                   <div className="flex-1">
                     <span className="text-slate-200 font-medium">Use Hierarchical Generation</span>
                     <p className="text-xs text-slate-500">Generate anchor frames first, then derive children for 3x faster generation</p>
+                  </div>
+                </label>
+
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={useConceptualMode}
+                    onChange={(e) => setUseConceptualMode(e.target.checked)}
+                    className="w-5 h-5 bg-slate-950 border-slate-700 rounded text-pink-500 focus:ring-2 focus:ring-pink-500"
+                  />
+                  <div className="flex-1">
+                    <span className="text-slate-200 font-medium">Conceptual Mode</span>
+                    <p className="text-xs text-slate-500">Symbolic, atmosphere-driven narrative that embodies the song's spirit (not literal lyric interpretation)</p>
                   </div>
                 </label>
               </div>
@@ -1181,6 +1199,20 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
                           <div className="flex-1">
                             <span className="text-slate-200 font-medium text-sm">Use Hierarchical Generation</span>
                             <p className="text-xs text-slate-500">Anchor frames + parallel generation (3x faster)</p>
+                          </div>
+                        </label>
+
+                        {/* Conceptual Mode Toggle */}
+                        <label className="flex items-center gap-3 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={useConceptualMode}
+                            onChange={(e) => setUseConceptualMode(e.target.checked)}
+                            className="w-4 h-4 bg-slate-950 border-slate-700 rounded text-pink-500 focus:ring-2 focus:ring-pink-500"
+                          />
+                          <div className="flex-1">
+                            <span className="text-slate-200 font-medium text-sm">Conceptual Mode</span>
+                            <p className="text-xs text-slate-500">Symbolic, atmosphere-driven narrative (not literal lyric interpretation)</p>
                           </div>
                         </label>
                       </div>
