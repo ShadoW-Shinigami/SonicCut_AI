@@ -38,6 +38,13 @@ export interface Character {
   imageUrl?: string; // Base64
 }
 
+export interface Location {
+  id: string;
+  name: string;
+  description: string;
+  imageUrl?: string; // Base64 single wide-angle reference
+}
+
 export interface SceneScript {
   id: string;
   markerId: string;
@@ -45,6 +52,7 @@ export interface SceneScript {
   description: string;
   interpolationPrompt: string; // Prompt to get from this scene to the next
   characterIds?: string[]; // List of IDs of characters present in this scene
+  locationIds?: string[]; // List of IDs of locations in this scene
 }
 
 export interface StoryboardFrame extends SceneScript {
@@ -56,6 +64,7 @@ export interface StoryboardFrame extends SceneScript {
 export interface VideoPlan {
   narrativeSummary: string;
   characters: Character[];
+  locations: Location[];
   scenes: SceneScript[];
 }
 

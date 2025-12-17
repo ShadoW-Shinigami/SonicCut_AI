@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
-import { AudioAnalysis, Character, VideoPlan, AspectRatio, HierarchyTree, HierarchyNode, TransformationDelta } from "../types";
+import { AudioAnalysis, Character, Location, VideoPlan, AspectRatio, HierarchyTree, HierarchyNode, TransformationDelta } from "../types";
 
 const parseAudioToBase64 = async (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
@@ -62,6 +62,52 @@ const compressToJPEG = async (base64Data: string, quality: number = 0.85): Promi
   });
 };
 
+/**
+ * Add text label at the top of an image using canvas
+ */
+const addTextLabelToImage = async (
+  base64Data: string,
+  label: string
+): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const labelHeight = 40;
+      canvas.width = img.width;
+      canvas.height = img.height + labelHeight;
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error("Could not get canvas context"));
+        return;
+      }
+
+      // Black bar at top
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, canvas.width, labelHeight);
+
+      // White text
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 24px Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, canvas.width / 2, labelHeight / 2);
+
+      // Draw original image below
+      ctx.drawImage(img, 0, labelHeight);
+
+      const labeledDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      const base64 = labeledDataUrl.split(',')[1];
+      resolve(base64);
+    };
+
+    img.onerror = () => reject(new Error("Failed to load image for labeling"));
+    img.src = `data:image/jpeg;base64,${base64Data}`;
+  });
+};
+
 // Helper to map app aspect ratios to supported API ratios
 // Supported: '1:1', '3:4', '4:3', '9:16', '16:9'
 const getSupportedAspectRatio = (ratio: AspectRatio): string => {
@@ -77,7 +123,7 @@ export const analyzeAudioCreatively = async (file: File): Promise<AudioAnalysis>
     type: Type.OBJECT,
     properties: {
       genre: { type: Type.STRING, description: "The musical genre of the track" },
-      theme: { type: Type.STRING, description: "The emotional theme or mood" },
+      theme: { type: Type.STRING, description: "The emotional theme or mood AND the gender of the singer if applicable" },
       instruments: {
         type: Type.ARRAY,
         items: { type: Type.STRING },
@@ -91,7 +137,7 @@ export const analyzeAudioCreatively = async (file: File): Promise<AudioAnalysis>
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash", 
+      model: "gemini-3-flash-preview", 
       contents: {
         parts: [
           {
@@ -101,15 +147,18 @@ export const analyzeAudioCreatively = async (file: File): Promise<AudioAnalysis>
             }
           },
           {
-            text: "Analyze this audio file. Return the Genre, Theme, Instruments, estimated BPM, and Lyrics (if any)."
+            text: "Analyze this audio file. Return the Genre, Theme (Include the gender of the singer in the theme), Instruments, estimated BPM, and Lyrics (if any with proper formatting). Double check and ensure that the JSON is valid. Pay extra close attention to the lyrics section."
           }
         ]
       },
       config: {
         responseMimeType: "application/json",
-        responseSchema: schema
+        responseSchema: schema,
+		thinkingConfig: {
+			thinkingLevel: 'HIGH',
       }
-    });
+    }
+  });
 
     const text = response.text;
     if (!text) throw new Error("No response from Gemini");
@@ -152,6 +201,21 @@ export const generateVideoNarrative = async (
           required: ["id", "name", "description"]
         }
       },
+      locations: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            id: { type: Type.STRING },
+            name: { type: Type.STRING },
+            description: {
+              type: Type.STRING,
+              description: "Visual description emphasizing architectural elements, environment, spatial layout for wide-angle reference. Be specific about the type of location."
+            }
+          },
+          required: ["id", "name", "description"]
+        }
+      },
       scenes: {
         type: Type.ARRAY,
         description: `Must generate exactly ${cutCount} shots. This is critical - the number must match exactly.`,
@@ -164,44 +228,47 @@ export const generateVideoNarrative = async (
                 type: Type.ARRAY,
                 items: { type: Type.STRING },
                 description: "List of 'id's of characters that appear in this specific shot. Leave empty if no specific character is present."
+            },
+            locationIds: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: "Array of location IDs where this shot takes place"
             }
           },
-          required: ["description", "interpolationPrompt", "characterIds"]
+          required: ["description", "interpolationPrompt", "characterIds", "locationIds"]
         }
       }
     },
-    required: ["narrativeSummary", "characters", "scenes"]
+    required: ["narrativeSummary", "characters", "locations", "scenes"]
   };
 
   const feedbackSection = userFeedback
     ? `\n\nUser Feedback/Direction: ${userFeedback}\nPlease incorporate this feedback into the narrative plan.`
     : '';
 
-  const prompt = `
-    Plan a music video for a song with the following details:
-    Theme: ${analysis.theme}
-    Genre: ${analysis.genre}
-    Lyrics/Context: ${analysis.lyrics}
+  const prompt = `Plan a music video for a song with exactly ${cutCount} shots.
 
-    Constraints:
-    1. The video must have exactly ${cutCount} shots. CRITICAL: Generate exactly ${cutCount} shots, no more, no less.
-    2. Each shot is a single frame/image in the storyboard.
-    3. No dialogue. Pure visual storytelling.
-    4. The Lyrics only exist to provide you context. The narrative does not have to be 1:1 what is in the lyrics or show whatever is in the lyrics as is. Just convey the feeling. This is for a music video. It can be a completely different story as long as the song makes sense when played under it. Lyrics are just a guide to give you an idea of what the music video is about.
-    5. The narrative should flow smoothly, designed for morphing/interpolation between shots.
-    6. Define the characters needed and assign them unique IDs.
-    7. For each shot, you MUST list the 'characterIds' of any characters present.
-    8. Output JSON.${feedbackSection}
-  `;
+Theme: ${analysis.theme}
+Genre: ${analysis.genre}
+Lyrics/Context: ${analysis.lyrics}
+
+Requirements:
+1. Exactly ${cutCount} shots - CRITICAL: Generate exactly ${cutCount} shots, no more, no less
+2. Define the characters needed with objective physical descriptions (gender, age, ethnicity, hair, objective outfit) and assign them unique IDs
+3. Define locations with detailed environmental descriptions (architecture, environment, spatial layout) and assign it a locationID
+4. For each shot: list characterIds AND locationIds (both arrays)
+5. No dialogue, pure visual storytelling
+6. Flow smoothly, designed for morphing/interpolation between shots
+7. Output JSON.${feedbackSection}`;
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-pro",
+    model: "gemini-3-flash-preview",
     contents: prompt,
     config: {
       responseMimeType: "application/json",
       responseSchema: schema,
       thinkingConfig: {
-        thinkingBudget: -1  // Unlimited thinking for better reasoning
+        thinkingLevel: 'HIGH'  // High-level thinking for better reasoning
       }
     } as any
   });
@@ -248,9 +315,13 @@ export const adjustShotCount = async (
             characterIds: {
               type: Type.ARRAY,
               items: { type: Type.STRING }
+            },
+            locationIds: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
             }
           },
-          required: ["description", "interpolationPrompt", "characterIds"]
+          required: ["description", "interpolationPrompt", "characterIds", "locationIds"]
         }
       }
     },
@@ -268,8 +339,11 @@ Current narrative: ${videoPlan.narrativeSummary}
 Characters (use these exact IDs when assigning to shots):
 ${videoPlan.characters.map(c => `- ID: "${c.id}", Name: ${c.name}, Description: ${c.description}`).join('\n')}
 
+Locations (use these exact IDs when assigning to shots):
+${videoPlan.locations.map(loc => `- ID: "${loc.id}", Name: ${loc.name}, Description: ${loc.description}`).join('\n')}
+
 Current shots:
-${videoPlan.scenes.map((s, i) => `${i + 1}. ${s.description} [CharacterIDs: ${JSON.stringify(s.characterIds || [])}]`).join('\n')}
+${videoPlan.scenes.map((s, i) => `${i + 1}. ${s.description} [CharacterIDs: ${JSON.stringify(s.characterIds || [])}, LocationIDs: ${JSON.stringify(s.locationIds || [])}]`).join('\n')}
 
 TASK: Add ${diff} more shot(s) to make it exactly ${targetCount} shots total. The new shots should:
 1. Fit naturally into the narrative flow
@@ -277,11 +351,11 @@ TASK: Add ${diff} more shot(s) to make it exactly ${targetCount} shots total. Th
 3. Maintain character consistency
 4. Keep the story coherent
 
-IMPORTANT - Character Attribution:
-- Each shot MUST have a characterIds array listing which characters appear in that shot
-- Use ONLY the character IDs listed above (e.g., "${videoPlan.characters[0]?.id || 'char-0'}")
-- If a shot has no characters visible, use an empty array: []
-- Make sure character appearances make narrative sense
+IMPORTANT - Attribution:
+- Each shot MUST have a characterIds array AND a locationIds array
+- Use ONLY the character/location IDs listed above
+- If a shot has no characters/locations, use an empty array: []
+- Make sure appearances make narrative sense
 
 Return ALL ${targetCount} shots (including the original ones) in the correct order.
 `;
@@ -296,8 +370,11 @@ Current narrative: ${videoPlan.narrativeSummary}
 Characters (use these exact IDs when assigning to shots):
 ${videoPlan.characters.map(c => `- ID: "${c.id}", Name: ${c.name}, Description: ${c.description}`).join('\n')}
 
+Locations (use these exact IDs when assigning to shots):
+${videoPlan.locations.map(loc => `- ID: "${loc.id}", Name: ${loc.name}, Description: ${loc.description}`).join('\n')}
+
 Current shots:
-${videoPlan.scenes.map((s, i) => `${i + 1}. ${s.description} [CharacterIDs: ${JSON.stringify(s.characterIds || [])}]`).join('\n')}
+${videoPlan.scenes.map((s, i) => `${i + 1}. ${s.description} [CharacterIDs: ${JSON.stringify(s.characterIds || [])}, LocationIDs: ${JSON.stringify(s.locationIds || [])}]`).join('\n')}
 
 TASK: Remove or merge ${toRemove} shot(s) to make it exactly ${targetCount} shots total. When removing:
 1. Keep the most important/impactful shots
@@ -305,24 +382,24 @@ TASK: Remove or merge ${toRemove} shot(s) to make it exactly ${targetCount} shot
 3. Maintain narrative flow
 4. Keep character consistency
 
-IMPORTANT - Character Attribution:
-- Each shot MUST have a characterIds array listing which characters appear in that shot
-- Use ONLY the character IDs listed above
-- If a shot has no characters visible, use an empty array: []
-- Make sure character appearances make narrative sense
+IMPORTANT - Attribution:
+- Each shot MUST have a characterIds array AND a locationIds array
+- Use ONLY the character/location IDs listed above
+- If a shot has no characters/locations, use an empty array: []
+- Make sure appearances make narrative sense
 
 Return exactly ${targetCount} shots in the correct order.
 `;
   }
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-pro",
+    model: "gemini-3-flash-preview",
     contents: prompt,
     config: {
       responseMimeType: "application/json",
       responseSchema: schema,
       thinkingConfig: {
-        thinkingBudget: -1  // Unlimited thinking for better reasoning
+        thinkingLevel: 'HIGH'  // High-level thinking for better reasoning
       }
     } as any
   });
@@ -352,11 +429,26 @@ export const generateCharacterSheet = async (
 ): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: getApiKey() });
 
+  const prompt = `Create a 2x2 grid character reference sheet with 4 views of the same character.
+
+Character: ${char.description}
+Style: ${style}
+
+CRITICAL REQUIREMENTS:
+- 2x2 grid layout: top-left = face closeup, top-right = 3/4 view, bottom-left = full body front, bottom-right = full body back
+- Same outfit across all 4 views
+- Neutral expression in all views
+- Neutral lighting (soft, even)
+- Plain neutral background
+- Suitable for reference matching in other images
+- No text or labels in the generated image
+- Maintain exact same visual identity across all 4 views`;
+
   const response = await ai.models.generateContent({
     model: "gemini-3-pro-image-preview",
     contents: {
       parts: [
-        { text: `You will be provided with a style and a character description, go through it, understand what the character must look like and create a 2X2 grid character sheet of the character with a closeup, mid body shot, a full body shot and a backview shot of the character standing against a neutral background . Style: ${style}. ${char.description}` }
+        { text: prompt }
       ]
     },
     config: {
@@ -372,16 +464,65 @@ export const generateCharacterSheet = async (
   for (const part of response.candidates?.[0]?.content?.parts || []) {
     if (part.inlineData) {
       // Compress to true JPEG at 85% quality
-      return await compressToJPEG(part.inlineData.data, 0.85);
+      const compressedBase64 = await compressToJPEG(part.inlineData.data, 0.85);
+      // Add character name label at top
+      return await addTextLabelToImage(compressedBase64, char.name);
     }
   }
   throw new Error("No image generated for character");
+};
+
+/**
+ * Generate single wide-angle location reference image
+ */
+export const generateLocationReference = async (
+  location: Location,
+  style: string
+): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: getApiKey() });
+
+  const prompt = `Create a wide-angle establishing shot of this location:
+
+Location: ${location.description}
+Style: ${style}
+
+CRITICAL REQUIREMENTS:
+- Wide-angle view showing maximum context and spatial layout
+- Capture key architectural elements and environmental features
+- Neutral, balanced composition
+- Show enough detail for closer shots to be derived from this view
+- No characters or people in the shot
+- No text or labels in the generated image
+- Cinematographic quality appropriate for music video`;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3-pro-image-preview",
+    contents: {
+      parts: [{ text: prompt }]
+    },
+    config: {
+      imageConfig: {
+        aspectRatio: "16:9",
+        imageSize: "2K",
+        output_mime_type: "image/jpeg"
+      } as any
+    }
+  });
+
+  for (const part of response.candidates?.[0]?.content?.parts || []) {
+    if (part.inlineData) {
+      const compressedBase64 = await compressToJPEG(part.inlineData.data, 0.85);
+      return await addTextLabelToImage(compressedBase64, location.name);
+    }
+  }
+  throw new Error("No image generated for location");
 };
 
 export const generateFirstFrame = async (
   description: string,
   aspectRatio: AspectRatio,
   activeCharacters: Character[],
+  activeLocations: Location[],
   style: string,
   promptModifier: string = ""
 ): Promise<string> => {
@@ -389,11 +530,12 @@ export const generateFirstFrame = async (
 
   const parts: any[] = [];
 
-  // Use the characters passed in arguments. Do not filter by text description.
-  // The caller (VideoPlanner) determines who is in the shot based on the Plan.
+  // Use the characters and locations passed in arguments. Do not filter by text description.
+  // The caller (VideoPlanner) determines what's in the shot based on the Plan.
   const validChars = activeCharacters.filter(c => c.imageUrl);
+  const validLocs = activeLocations.filter(loc => loc.imageUrl);
 
-  if (validChars.length > 0) {
+  if (validChars.length > 0 || validLocs.length > 0) {
       // Add all character sheets as input images
       validChars.forEach(c => {
           if (c.imageUrl) {
@@ -406,22 +548,45 @@ export const generateFirstFrame = async (
           }
       });
 
+      // Add location references
+      validLocs.forEach(loc => {
+          if (loc.imageUrl) {
+            parts.push({
+                inlineData: {
+                    mimeType: "image/jpeg",
+                    data: loc.imageUrl
+                }
+            });
+          }
+      });
+
       // Construct Prompt mapping images to names
       let charRefText = "The provided images are Character Reference Sheets: ";
       validChars.forEach((c, idx) => {
           charRefText += `Image ${idx + 1} represents "${c.name}". `;
       });
 
-      parts.push({ 
+      let locRefText = "";
+      if (validLocs.length > 0) {
+          locRefText = "Location References: ";
+          validLocs.forEach((loc, idx) => {
+              locRefText += `Image ${validChars.length + idx + 1} shows "${loc.name}". `;
+          });
+      }
+
+      parts.push({
           text: `Generate a scene matching the following description: "${description} ${promptModifier}".
-          IMPORTANT: ${charRefText}
-          You MUST ensure the characters in the generated scene look exactly like their reference images (same facial features, hair, clothing style).
-          Style: ${style}. Aspect Ratio: ${aspectRatio}.` 
+
+${charRefText}
+${locRefText}
+
+You MUST match the visual identity of characters and the environment/architecture of locations from their reference images.
+Style: ${style}. Aspect Ratio: ${aspectRatio}.`
       });
   } else {
       // Standard generation
-      parts.push({ 
-          text: `Cinematic shot, ${aspectRatio}, high resolution. Style: ${style}. ${description} ${promptModifier}` 
+      parts.push({
+          text: `Cinematic shot, ${aspectRatio}, high resolution. Style: ${style}. ${description} ${promptModifier}`
       });
   }
 
@@ -498,15 +663,100 @@ export const sanitizePrompt = async (
   }
 };
 
+/**
+ * Generate vision-based edit instructions using best practices
+ */
+export const generateEditInstructions = async (
+  parentImageBase64: string,
+  childDescription: string,
+  activeCharacters: Character[],
+  activeLocations: Location[]
+): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: getApiKey() });
+
+  let characterContext = "";
+  if (activeCharacters.length > 0) {
+    const names = activeCharacters.map(c => c.name).join(", ");
+    characterContext = `\nCharacters in scene: ${names}`;
+  }
+
+  let locationContext = "";
+  if (activeLocations.length > 0) {
+    locationContext = `\nLocation: ${activeLocations.map(loc => loc.name).join(", ")}`;
+  }
+
+  const prompt = `You are an expert image editing prompter for AI image-to-image models.
+
+ANALYZE the provided image and generate PRECISE edit instructions to transform it into the target scene.
+
+Target Scene: ${childDescription}${characterContext}${locationContext}
+
+IMPORTANT: The image contains labeled character sheets and location references. You can refer to characters BY NAME since they have labels.
+
+BEST PRACTICES FOR EDIT PROMPTS:
+1. Start with "Edit the image:" prefix
+2. Specify what to KEEP (preserve background, maintain character identity by name)
+3. Specify what to CHANGE (camera angle, framing, position, action)
+4. State EXACT character count (e.g., "EXACTLY 2 characters visible")
+5. Frame as incremental change from current image (zoom in, pan left, etc.)
+6. Use character names to refer to them (since character sheets are labeled)
+7. Explicit camera operations (dolly in/out, zoom, pan, tilt)
+8. Include negative constraints
+
+GOOD EXAMPLE:
+"Edit the image: Keep the cyberpunk street background and neon lighting. Zoom in 2x to frame Luna more closely, making her face occupy 50% of frame height. EXACTLY 1 character visible. Maintain Luna's exact appearance. DO NOT duplicate characters. DO NOT change background style."
+
+BAD EXAMPLE:
+"Show the character closer up in the street" (vague, no name, no preservation details)
+
+Generate complete edit prompt following these best practices:`;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: {
+      parts: [
+        {
+          inlineData: {
+            mimeType: "image/jpeg",
+            data: parentImageBase64
+          }
+        },
+        { text: prompt }
+      ]
+    },
+    config: {
+      thinkingConfig: {
+        thinkingLevel: 'HIGH'
+      }
+    }
+  });
+
+  const editInstructions = response.text?.trim();
+  if (!editInstructions) {
+    throw new Error("No edit instructions generated");
+  }
+
+  return editInstructions;
+};
+
 export const generateNextFrame = async (
   prevFrameBase64: string,
   description: string,
   aspectRatio: AspectRatio,
   activeCharacters: Character[],
+  activeLocations: Location[],
   style: string,
   promptModifier: string = ""
 ): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: getApiKey() });
+
+  // Generate vision-based edit instructions
+  const editInstructions = await generateEditInstructions(
+    prevFrameBase64,
+    description,
+    activeCharacters,
+    activeLocations
+  );
 
   // Start with previous frame (Input 1)
   const parts: any[] = [
@@ -518,40 +768,60 @@ export const generateNextFrame = async (
     }
   ];
 
-  // Use the characters passed in arguments.
+  // Add character sheets
   const validChars = activeCharacters.filter(c => c.imageUrl);
-  
-  if (validChars.length > 0) {
-     // Add character sheets (Input 2, 3...)
-     validChars.forEach(c => {
-         if (c.imageUrl) {
-            parts.push({
-                inlineData: {
-                    mimeType: "image/jpeg",
-                    data: c.imageUrl
-                }
-            });
-         }
-     });
+  validChars.forEach(c => {
+    if (c.imageUrl) {
+      parts.push({
+        inlineData: {
+          mimeType: "image/jpeg",
+          data: c.imageUrl
+        }
+      });
+    }
+  });
 
-     // Construct Prompt
-     let charRefText = "";
-     validChars.forEach((c, idx) => {
-         // +2 because Image 1 is the previous frame. So first char sheet is Image 2.
-         charRefText += `Image ${idx + 2} is the Character Reference for "${c.name}". `;
-     });
+  // Add location references
+  const validLocs = activeLocations.filter(loc => loc.imageUrl);
+  validLocs.forEach(loc => {
+    if (loc.imageUrl) {
+      parts.push({
+        inlineData: {
+          mimeType: "image/jpeg",
+          data: loc.imageUrl
+        }
+      });
+    }
+  });
 
-     parts.push({
-         text: `Edit the first image (Previous Frame) to transition into this new scene: "${description} ${promptModifier}". 
-         ${charRefText}
-         Ensure all characters in the new scene maintain the visual identity defined in their respective reference images.
-         Style: ${style}.`
-     });
-  } else {
-     parts.push({
-         text: `Edit the provided image to match this next scene description: "${description} ${promptModifier}". Maintain consistent style: ${style}.`
-     });
-  }
+  // Build reference text
+  let referenceText = "";
+  let imageIndex = 2; // Image 1 is previous frame
+
+  validChars.forEach((c) => {
+    referenceText += `Image ${imageIndex} is Character Reference: ${c.description}. `;
+    imageIndex++;
+  });
+
+  validLocs.forEach((loc) => {
+    referenceText += `Image ${imageIndex} is Location Reference: ${loc.description}. `;
+    imageIndex++;
+  });
+
+  parts.push({
+    text: `${editInstructions}
+
+${referenceText ? `REFERENCES:\n${referenceText}\n` : ''}
+Match references exactly for character identity and location environment.
+${promptModifier ? `\nModifier: ${promptModifier}` : ''}
+Style: ${style}.
+
+CRITICAL CONSTRAINTS:
+- DO NOT duplicate characters
+- DO NOT change background style unless edit instructions specify
+- DO NOT add new people beyond specified count
+- DO NOT alter character count`
+  });
 
   const response = await ai.models.generateContent({
     model: "gemini-3-pro-image-preview",
@@ -635,11 +905,55 @@ const buildHierarchyTree = (
     }
   }
 
-  // Validate: all nodes at depth 0 should have parentIndex === null
+  // Validate and fix circular references
+  const fixedNodes = new Set<number>();
+
   nodes.forEach((node, idx) => {
+    // Fix nodes at depth 0 with non-null parents
     if (node.depth === 0 && node.parentIndex !== null) {
       console.warn(`⚠️ Node ${idx} at depth 0 has parent ${node.parentIndex}. Fixing to make it a true parent.`);
+
+      // Remove this node from its parent's childIndices (circular reference)
+      const oldParent = nodes[node.parentIndex];
+      if (oldParent) {
+        oldParent.childIndices = oldParent.childIndices.filter(childIdx => childIdx !== idx);
+      }
+
       node.parentIndex = null;
+      fixedNodes.add(idx);
+    }
+
+    // Remove self-references from childIndices (node cannot be its own child)
+    node.childIndices = node.childIndices.filter(childIdx => childIdx !== idx);
+  });
+
+  // Detect and break circular references in parent chains
+  const detectCycle = (nodeIndex: number, visited: Set<number>): boolean => {
+    if (visited.has(nodeIndex)) return true; // Cycle detected
+    if (nodes[nodeIndex].parentIndex === null) return false; // Reached root
+
+    visited.add(nodeIndex);
+    return detectCycle(nodes[nodeIndex].parentIndex!, visited);
+  };
+
+  nodes.forEach((node, idx) => {
+    if (node.parentIndex !== null) {
+      const visited = new Set<number>();
+      if (detectCycle(idx, visited)) {
+        console.warn(`⚠️ Node ${idx} has circular parent chain. Making it a root parent.`);
+
+        // Remove from old parent's children
+        if (node.parentIndex >= 0 && nodes[node.parentIndex]) {
+          nodes[node.parentIndex].childIndices = nodes[node.parentIndex].childIndices.filter(
+            childIdx => childIdx !== idx
+          );
+        }
+
+        // Make it a parent
+        node.parentIndex = null;
+        node.depth = 0;
+        fixedNodes.add(idx);
+      }
     }
   });
 
@@ -648,7 +962,7 @@ const buildHierarchyTree = (
 
   return {
     nodes,
-    parentIndices: geminiResult.parentIndices,
+    parentIndices: Array.from(new Set([...geminiResult.parentIndices, ...Array.from(fixedNodes)])),
     maxDepth
   };
 };
@@ -753,13 +1067,13 @@ Prefer FEWER parents with DEEPER hierarchies over MANY parents with shallow hier
 `;
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-pro",
+    model: "gemini-3-flash-preview",
     contents: prompt,
     config: {
       responseMimeType: "application/json",
       responseSchema: schema,
       thinkingConfig: {
-        thinkingBudget: -1  // Unlimited thinking for better reasoning
+        thinkingLevel: 'HIGH'  // High-level thinking for better reasoning
       }
     } as any
   });
@@ -844,7 +1158,7 @@ Provide complete literal instructions that a compositor could execute.
 `;
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-pro",
+    model: "gemini-3-flash-preview",
     contents: {
       parts: [
         {
@@ -858,7 +1172,10 @@ Provide complete literal instructions that a compositor could execute.
     },
     config: {
       responseMimeType: "application/json",
-      responseSchema: schema
+      responseSchema: schema,
+      thinkingConfig: {
+        thinkingLevel: 'HIGH'
+      }
     }
   });
 
@@ -877,6 +1194,7 @@ export const generateFrameFromParent = async (
   childDescription: string,
   aspectRatio: AspectRatio,
   activeCharacters: Character[],
+  activeLocations: Location[],
   style: string,
   promptModifier: string = ""
 ): Promise<string> => {
@@ -893,48 +1211,57 @@ export const generateFrameFromParent = async (
 
   // Add character sheets if present
   const validChars = activeCharacters.filter(c => c.imageUrl);
-  if (validChars.length > 0) {
-    validChars.forEach(c => {
-      if (c.imageUrl) {
-        parts.push({
-          inlineData: {
-            mimeType: "image/jpeg",
-            data: c.imageUrl
-          }
-        });
-      }
-    });
+  validChars.forEach(c => {
+    if (c.imageUrl) {
+      parts.push({
+        inlineData: {
+          mimeType: "image/jpeg",
+          data: c.imageUrl
+        }
+      });
+    }
+  });
 
-    let charRefText = "";
-    validChars.forEach((c, idx) => {
-      charRefText += `Image ${idx + 2} is the Character Reference for "${c.name}". `;
-    });
+  // Add location references
+  const validLocs = activeLocations.filter(loc => loc.imageUrl);
+  validLocs.forEach(loc => {
+    if (loc.imageUrl) {
+      parts.push({
+        inlineData: {
+          mimeType: "image/jpeg",
+          data: loc.imageUrl
+        }
+      });
+    }
+  });
 
-    parts.push({
-      text: `Edit Image 1 (parent frame) using these LITERAL transformation instructions:
+  // Build reference text
+  let referenceText = "";
+  let imageIndex = 2; // Image 1 is parent frame
+
+  validChars.forEach((c) => {
+    referenceText += `Image ${imageIndex} is Character Reference for "${c.name}". `;
+    imageIndex++;
+  });
+
+  validLocs.forEach((loc) => {
+    referenceText += `Image ${imageIndex} is Location Reference for "${loc.name}". `;
+    imageIndex++;
+  });
+
+  parts.push({
+    text: `Edit Image 1 (parent frame) using these LITERAL transformation instructions:
 
 ${transformationDelta.literalInstructions}
 
 Target scene description: ${childDescription} ${promptModifier}
 
-${charRefText}
-Ensure all characters maintain visual identity from their reference images.
+${referenceText ? `REFERENCES:\n${referenceText}\n` : ''}
+Ensure all characters maintain visual identity and locations match environment from reference images.
 Style: ${style}.
 
 IMPORTANT: Follow the transformation instructions PRECISELY. Do not deviate from the specified camera operations and framing changes.`
-    });
-  } else {
-    parts.push({
-      text: `Edit the provided image using these LITERAL transformation instructions:
-
-${transformationDelta.literalInstructions}
-
-Target scene: ${childDescription} ${promptModifier}
-Style: ${style}.
-
-IMPORTANT: Follow the transformation instructions PRECISELY.`
-    });
-  }
+  });
 
   const response = await ai.models.generateContent({
     model: "gemini-3-pro-image-preview",

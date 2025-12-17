@@ -33,11 +33,18 @@ export const DetailsPanel: React.FC<DetailsPanelProps> = ({
     if (!node) return [];
 
     const descendants: number[] = [];
+    const visited = new Set<number>([idx]); // Track visited nodes to prevent infinite loops
     const queue = [...node.childIndices];
 
     while (queue.length > 0) {
       const childIdx = queue.shift()!;
+
+      // Skip if already visited (circular reference protection)
+      if (visited.has(childIdx)) continue;
+
+      visited.add(childIdx);
       descendants.push(childIdx);
+
       const childNode = hierarchyTree.nodes[childIdx];
       if (childNode) {
         queue.push(...childNode.childIndices);
