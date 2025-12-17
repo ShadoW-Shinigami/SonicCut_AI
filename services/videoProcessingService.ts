@@ -5,12 +5,43 @@ import { AspectRatio, AspectRatioDimensions } from '../types';
 let ffmpeg: FFmpeg | null = null;
 let ffmpegLoaded = false;
 let loadingPromise: Promise<FFmpeg> | null = null;
+let operationCount = 0;
+const MAX_OPERATIONS_BEFORE_RELOAD = 20; // Preventive reload every 20 operations
+
+/**
+ * Force reload FFmpeg instance (for error recovery or preventive maintenance)
+ */
+export const reloadFFmpeg = async (): Promise<void> => {
+  console.log('🔄 Reloading FFmpeg instance...');
+
+  if (ffmpeg) {
+    try {
+      await ffmpeg.terminate();
+    } catch (e) {
+      console.warn('Warning during FFmpeg termination:', e);
+    }
+  }
+
+  ffmpeg = null;
+  ffmpegLoaded = false;
+  loadingPromise = null;
+  operationCount = 0;
+};
 
 /**
  * Get singleton FFmpeg instance, loading WASM if needed
  */
 export const getFFmpeg = async (onProgress?: (progress: number) => void): Promise<FFmpeg> => {
-  if (ffmpeg && ffmpegLoaded) return ffmpeg;
+  // Preventive reload if too many operations
+  if (ffmpeg && ffmpegLoaded && operationCount >= MAX_OPERATIONS_BEFORE_RELOAD) {
+    console.log(`⚠️ Reached ${operationCount} operations, reloading FFmpeg for memory management`);
+    await reloadFFmpeg();
+  }
+
+  if (ffmpeg && ffmpegLoaded) {
+    operationCount++;
+    return ffmpeg;
+  }
 
   // Prevent multiple simultaneous loads
   if (loadingPromise) return loadingPromise;
@@ -34,6 +65,7 @@ export const getFFmpeg = async (onProgress?: (progress: number) => void): Promis
     });
 
     ffmpegLoaded = true;
+    operationCount = 0;
     return ffmpeg;
   })();
 
@@ -79,23 +111,25 @@ const safeDeleteFile = async (ff: FFmpeg, filename: string): Promise<void> => {
 export const applySpeedRamp = async (
   videoBlob: Blob,
   speedFactor: number,
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  retryCount: number = 0
 ): Promise<Blob> => {
-  const ff = await getFFmpeg(onProgress);
-
-  // Use unique filenames to prevent conflicts
-  const timestamp = Date.now();
-  const inputFile = `input_${timestamp}.mp4`;
-  const outputFile = `output_${timestamp}.mp4`;
-
   try {
-    // Cleanup any leftover files first
-    await safeDeleteFile(ff, inputFile);
-    await safeDeleteFile(ff, outputFile);
+    const ff = await getFFmpeg(onProgress);
 
-    // Write input file
-    const inputData = new Uint8Array(await videoBlob.arrayBuffer());
-    await ff.writeFile(inputFile, inputData);
+    // Use unique filenames to prevent conflicts
+    const timestamp = Date.now();
+    const inputFile = `input_${timestamp}.mp4`;
+    const outputFile = `output_${timestamp}.mp4`;
+
+    try {
+      // Cleanup any leftover files first
+      await safeDeleteFile(ff, inputFile);
+      await safeDeleteFile(ff, outputFile);
+
+      // Write input file
+      const inputData = new Uint8Array(await videoBlob.arrayBuffer());
+      await ff.writeFile(inputFile, inputData);
 
     // For smooth ease-in-out, we use a more sophisticated approach:
     // Divide the video into segments with varying speed
@@ -142,17 +176,37 @@ export const applySpeedRamp = async (
       );
     }
 
-    const outputData = await ff.readFile(outputFile);
+      const outputData = await ff.readFile(outputFile);
 
-    // Cleanup
-    await safeDeleteFile(ff, inputFile);
-    await safeDeleteFile(ff, outputFile);
+      // Cleanup
+      await safeDeleteFile(ff, inputFile);
+      await safeDeleteFile(ff, outputFile);
 
-    return new Blob([outputData], { type: 'video/mp4' });
+      return new Blob([outputData], { type: 'video/mp4' });
+    } catch (error) {
+      // Ensure cleanup even on error
+      await safeDeleteFile(ff, inputFile);
+      await safeDeleteFile(ff, outputFile);
+      throw error;
+    }
   } catch (error) {
-    // Ensure cleanup even on error
-    await safeDeleteFile(ff, inputFile);
-    await safeDeleteFile(ff, outputFile);
+    // Error recovery: reload FFmpeg and retry once
+    const errorMessage = (error as Error).message || String(error);
+    const isWasmError = errorMessage.includes('memory access out of bounds') ||
+                       errorMessage.includes('RuntimeError') ||
+                       errorMessage.includes('Aborted');
+
+    if (isWasmError && retryCount === 0) {
+      console.warn(`⚠️ FFmpeg WASM error detected: ${errorMessage}`);
+      console.log('🔄 Reloading FFmpeg and retrying operation...');
+
+      await reloadFFmpeg();
+
+      // Retry once
+      return applySpeedRamp(videoBlob, speedFactor, onProgress, retryCount + 1);
+    }
+
+    // If not a WASM error or already retried, throw the error
     throw error;
   }
 };
@@ -242,7 +296,8 @@ export const applyEaseInOutSpeedRamp = async (
  */
 export const stitchVideos = async (
   videoBlobs: Blob[],
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  retryCount: number = 0
 ): Promise<Blob> => {
   if (videoBlobs.length === 0) {
     throw new Error('No videos to stitch');
@@ -252,44 +307,65 @@ export const stitchVideos = async (
     return videoBlobs[0];
   }
 
-  const ff = await getFFmpeg(onProgress);
+  try {
+    const ff = await getFFmpeg(onProgress);
 
-  // Write all input files
-  const inputFiles: string[] = [];
-  for (let i = 0; i < videoBlobs.length; i++) {
-    const filename = `clip_${i}.mp4`;
-    const data = new Uint8Array(await videoBlobs[i].arrayBuffer());
-    await ff.writeFile(filename, data);
-    inputFiles.push(filename);
+    // Write all input files
+    const inputFiles: string[] = [];
+    for (let i = 0; i < videoBlobs.length; i++) {
+      const filename = `clip_${i}.mp4`;
+      const data = new Uint8Array(await videoBlobs[i].arrayBuffer());
+      await ff.writeFile(filename, data);
+      inputFiles.push(filename);
+    }
+
+    // Create concat demuxer file
+    const concatContent = inputFiles.map(f => `file '${f}'`).join('\n');
+    await ff.writeFile('concat.txt', concatContent);
+
+    // Concatenate videos
+    await withTimeout(
+      ff.exec([
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', 'concat.txt',
+        '-c', 'copy',
+        '-y', 'final_output.mp4'
+      ]),
+      180000, // 3 minutes for stitching (longer for many clips)
+      'FFmpeg stitching operation timed out after 3 minutes'
+    );
+
+    const outputData = await ff.readFile('final_output.mp4');
+
+    // Cleanup all files
+    for (const file of inputFiles) {
+      await ff.deleteFile(file);
+    }
+    await ff.deleteFile('concat.txt');
+    await ff.deleteFile('final_output.mp4');
+
+    return new Blob([outputData], { type: 'video/mp4' });
+  } catch (error) {
+    // Error recovery: reload FFmpeg and retry once
+    const errorMessage = (error as Error).message || String(error);
+    const isWasmError = errorMessage.includes('memory access out of bounds') ||
+                       errorMessage.includes('RuntimeError') ||
+                       errorMessage.includes('Aborted');
+
+    if (isWasmError && retryCount === 0) {
+      console.warn(`⚠️ FFmpeg WASM error during stitching: ${errorMessage}`);
+      console.log('🔄 Reloading FFmpeg and retrying stitching...');
+
+      await reloadFFmpeg();
+
+      // Retry once
+      return stitchVideos(videoBlobs, onProgress, retryCount + 1);
+    }
+
+    // If not a WASM error or already retried, throw the error
+    throw error;
   }
-
-  // Create concat demuxer file
-  const concatContent = inputFiles.map(f => `file '${f}'`).join('\n');
-  await ff.writeFile('concat.txt', concatContent);
-
-  // Concatenate videos
-  await withTimeout(
-    ff.exec([
-      '-f', 'concat',
-      '-safe', '0',
-      '-i', 'concat.txt',
-      '-c', 'copy',
-      '-y', 'final_output.mp4'
-    ]),
-    180000, // 3 minutes for stitching (longer for many clips)
-    'FFmpeg stitching operation timed out after 3 minutes'
-  );
-
-  const outputData = await ff.readFile('final_output.mp4');
-
-  // Cleanup all files
-  for (const file of inputFiles) {
-    await ff.deleteFile(file);
-  }
-  await ff.deleteFile('concat.txt');
-  await ff.deleteFile('final_output.mp4');
-
-  return new Blob([outputData], { type: 'video/mp4' });
 };
 
 /**

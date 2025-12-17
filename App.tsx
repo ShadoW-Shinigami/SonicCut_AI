@@ -44,6 +44,7 @@ const App: React.FC = () => {
   const [storyboard, setStoryboard] = useState<StoryboardFrame[]>([]);
   const [hierarchyTree, setHierarchyTree] = useState<HierarchyTree | null>(null);
   const [useHierarchy, setUseHierarchy] = useState<boolean>(false);
+  const [useConceptualMode, setUseConceptualMode] = useState<boolean>(false);
 
   // Phase 3 State (lifted from VideoPlanner)
   const [videoClips, setVideoClips] = useState<VideoClip[]>([]);
@@ -69,6 +70,7 @@ const App: React.FC = () => {
     useCustomCount,
     hierarchyTree,
     useHierarchy,
+    useConceptualMode,
     // Phase 2 state
     aspectRatio,
     visualStyle,
@@ -290,6 +292,7 @@ const App: React.FC = () => {
       setStoryboard(project.storyboard || []);
       setHierarchyTree(project.hierarchyTree || null);
       setUseHierarchy(!!project.hierarchyTree); // Enable hierarchy if tree exists
+      setUseConceptualMode(project.narrativeMode === 'conceptual'); // Restore narrative mode
 
       // Restore Phase 3 state: ALWAYS reset to project's values (or empty)
       setVideoClips(project.videoClips || []);
@@ -637,6 +640,8 @@ const App: React.FC = () => {
                   setHierarchyTree={setHierarchyTree}
                   useHierarchy={useHierarchy}
                   setUseHierarchy={setUseHierarchy}
+                  useConceptualMode={useConceptualMode}
+                  setUseConceptualMode={setUseConceptualMode}
                   videoClips={videoClips}
                   setVideoClips={setVideoClips}
                   finalVideoBlob={finalVideoBlob}

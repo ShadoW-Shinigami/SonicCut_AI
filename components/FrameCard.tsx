@@ -1,12 +1,13 @@
 import React from 'react';
-import { StoryboardFrame, HierarchyNode, Character } from '../types';
-import { Loader2, RefreshCw, PlayCircle, AlertTriangle } from 'lucide-react';
+import { StoryboardFrame, HierarchyNode, Character, Location } from '../types';
+import { Loader2, RefreshCw, PlayCircle, AlertTriangle, MapPin } from 'lucide-react';
 
 interface FrameCardProps {
   frame: StoryboardFrame;
   index: number;
   hierarchyNode?: HierarchyNode;
   characters: Character[];
+  locations: Location[];
   aspectRatio: string;
   isSelected: boolean;
   isGenerating: boolean;
@@ -19,6 +20,7 @@ export const FrameCard: React.FC<FrameCardProps> = ({
   index,
   hierarchyNode,
   characters,
+  locations,
   aspectRatio,
   isSelected,
   isGenerating,
@@ -72,16 +74,36 @@ export const FrameCard: React.FC<FrameCardProps> = ({
 
         {/* Image Area */}
         <div className={`w-full ${getAspectClass()} bg-black relative flex items-center justify-center`}>
-          {/* Active Characters Tag */}
-          <div className="absolute top-2 left-2 flex gap-1 flex-wrap z-10 pointer-events-none">
-            {frame.characterIds?.map(cid => {
-              const char = characters.find(c => c.id === cid);
-              return char ? (
-                <span key={cid} className="text-[8px] bg-black/60 text-white px-2 py-0.5 rounded backdrop-blur-md border border-white/10">
-                  {char.name}
-                </span>
-              ) : null;
-            })}
+          {/* Active Characters and Locations Tags */}
+          <div className="absolute top-2 left-2 flex flex-col gap-1 z-10 pointer-events-none">
+            {/* Character Tags */}
+            {frame.characterIds && frame.characterIds.length > 0 && (
+              <div className="flex gap-1 flex-wrap">
+                {frame.characterIds.map(cid => {
+                  const char = characters.find(c => c.id === cid);
+                  return char ? (
+                    <span key={cid} className="text-[8px] bg-black/60 text-white px-2 py-0.5 rounded backdrop-blur-md border border-white/10">
+                      {char.name}
+                    </span>
+                  ) : null;
+                })}
+              </div>
+            )}
+
+            {/* Location Tags */}
+            {frame.locationIds && frame.locationIds.length > 0 && (
+              <div className="flex gap-1 flex-wrap">
+                {frame.locationIds.map(lid => {
+                  const loc = locations.find(l => l.id === lid);
+                  return loc ? (
+                    <span key={lid} className="text-[8px] bg-emerald-900/60 text-emerald-200 px-2 py-0.5 rounded backdrop-blur-md border border-emerald-400/30 flex items-center gap-1">
+                      <MapPin className="w-2 h-2" />
+                      {loc.name}
+                    </span>
+                  ) : null;
+                })}
+              </div>
+            )}
           </div>
 
           {frame.imageUrl ? (

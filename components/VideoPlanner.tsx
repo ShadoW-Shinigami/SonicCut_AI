@@ -1,9 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { AudioAnalysis, Marker, AspectRatio, VideoPlan, StoryboardFrame, Character, VideoClip, VideoGenerationState, HierarchyTree } from '../types';
-import { generateVideoNarrative, generateCharacterSheet, generateFirstFrame, generateNextFrame, sanitizePrompt, generateHierarchicalPlan, generateTransformationDelta, generateFrameFromParent, adjustShotCount } from '../services/geminiService';
+import { AudioAnalysis, Marker, AspectRatio, VideoPlan, StoryboardFrame, Character, Location, VideoClip, VideoGenerationState, HierarchyTree } from '../types';
+import { generateVideoNarrative, generateCharacterSheet, generateLocationReference, generateFirstFrame, generateNextFrame, sanitizePrompt, generateHierarchicalPlan, generateTransformationDelta, generateFrameFromParent, adjustShotCount } from '../services/geminiService';
 import { generateVideoClip, selectVideoDuration, calculateSpeedFactor, fetchVideoAsBlob } from '../services/klingService';
 import { generateBlackFrame, applySpeedRamp, stitchVideos, getFFmpeg, isFFmpegLoaded, createVideoUrl, revokeVideoUrl } from '../services/videoProcessingService';
-import { Clapperboard, Film, User, Loader2, PlaySquare, ArrowRight, LayoutTemplate, Package, StopCircle, RefreshCw, PlayCircle, AlertTriangle, Video, Download, Pause, Play, X, MessageSquare } from 'lucide-react';
+import { Clapperboard, Film, User, Loader2, PlaySquare, ArrowRight, LayoutTemplate, Package, StopCircle, RefreshCw, PlayCircle, AlertTriangle, Video, Download, Pause, Play, X, MessageSquare, MapPin } from 'lucide-react';
 import { FrameCard } from './FrameCard';
 import { DetailsPanel } from './DetailsPanel';
 import JSZip from 'jszip';
@@ -26,6 +26,9 @@ interface VideoPlannerProps {
   setHierarchyTree: (tree: HierarchyTree | null) => void;
   useHierarchy: boolean;
   setUseHierarchy: (use: boolean) => void;
+  // Narrative mode (controlled by parent)
+  useConceptualMode: boolean;
+  setUseConceptualMode: (use: boolean) => void;
   // Phase 3 state (controlled by parent)
   videoClips: VideoClip[];
   setVideoClips: (clips: VideoClip[]) => void;
@@ -50,6 +53,8 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
   setHierarchyTree,
   useHierarchy,
   setUseHierarchy,
+  useConceptualMode,
+  setUseConceptualMode,
   videoClips,
   setVideoClips,
   finalVideoBlob,
@@ -119,7 +124,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
     }
     setIsPlanning(true);
     try {
-      let videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio);
+      let videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio, useConceptualMode);
 
       // Auto-fix shot count mismatch
       if (videoPlan.scenes.length !== markers.length) {
@@ -165,8 +170,11 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
         setHierarchyTree(null);
       }
 
-      // Trigger character generation immediately after plan is ready
+      // Trigger character and location generation immediately after plan is ready
       generateCharacters(videoPlan.characters);
+      if (videoPlan.locations && videoPlan.locations.length > 0) {
+        generateLocations(videoPlan.locations);
+      }
 
     } catch (e) {
       console.error(e);
@@ -196,7 +204,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
     setShowFeedbackDialog(false);
     setIsPlanning(true);
     try {
-      let videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio, feedback);
+      let videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio, useConceptualMode, feedback);
 
       // Auto-fix shot count mismatch
       if (videoPlan.scenes.length !== markers.length) {
@@ -242,8 +250,11 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
         setHierarchyTree(null);
       }
 
-      // Trigger character generation immediately after plan is ready
+      // Trigger character and location generation immediately after plan is ready
       generateCharacters(videoPlan.characters);
+      if (videoPlan.locations && videoPlan.locations.length > 0) {
+        generateLocations(videoPlan.locations);
+      }
 
     } catch (e) {
       console.error(e);
@@ -257,15 +268,23 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
     setIsGeneratingChars(true);
     const updatedChars = [...chars];
 
-    for (let i = 0; i < updatedChars.length; i++) {
-        try {
-            const base64 = await generateCharacterSheet(updatedChars[i], visualStyle);
-            updatedChars[i].imageUrl = base64;
-            // Update state incrementally to show progress
-            setPlan(prev => prev ? { ...prev, characters: [...updatedChars] } : null);
-        } catch (e) {
-            console.error(`Failed to generate char ${updatedChars[i].name}`, e);
-        }
+    // Generate in batches of 3 parallel requests
+    const MAX_CONCURRENT = 3;
+    for (let i = 0; i < updatedChars.length; i += MAX_CONCURRENT) {
+        const batch = updatedChars.slice(i, i + MAX_CONCURRENT);
+        await Promise.all(
+            batch.map(async (char, batchIndex) => {
+                const actualIndex = i + batchIndex;
+                try {
+                    const base64 = await generateCharacterSheet(char, visualStyle);
+                    updatedChars[actualIndex].imageUrl = base64;
+                    // Update state incrementally to show progress
+                    setPlan(prev => prev ? { ...prev, characters: [...updatedChars] } : null);
+                } catch (e) {
+                    console.error(`Failed to generate char ${char.name}`, e);
+                }
+            })
+        );
     }
     setIsGeneratingChars(false);
   };
@@ -282,6 +301,49 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
       setPlan({ ...plan, characters: updatedChars });
     } catch (e) {
       console.error(`Failed to regenerate char ${updatedChars[charIndex].name}`, e);
+    }
+
+    setIsGeneratingChars(false);
+  };
+
+  const generateLocations = async (locs: Location[]) => {
+    if (locs.length === 0) return;
+
+    setIsGeneratingChars(true); // Reuse same loading state
+    const updatedLocs = [...locs];
+
+    // Generate in batches of 3 parallel requests
+    const MAX_CONCURRENT = 3;
+    for (let i = 0; i < updatedLocs.length; i += MAX_CONCURRENT) {
+      const batch = updatedLocs.slice(i, i + MAX_CONCURRENT);
+      await Promise.all(
+        batch.map(async (loc, batchIndex) => {
+          const actualIndex = i + batchIndex;
+          try {
+            const base64 = await generateLocationReference(loc, visualStyle);
+            updatedLocs[actualIndex].imageUrl = base64;
+            setPlan(prev => prev ? { ...prev, locations: [...updatedLocs] } : null);
+          } catch (e) {
+            console.error(`Failed to generate location ${loc.name}`, e);
+          }
+        })
+      );
+    }
+    setIsGeneratingChars(false);
+  };
+
+  const regenerateLocation = async (locIndex: number) => {
+    if (!plan) return;
+
+    setIsGeneratingChars(true);
+    const updatedLocs = [...plan.locations];
+
+    try {
+      const base64 = await generateLocationReference(updatedLocs[locIndex], visualStyle);
+      updatedLocs[locIndex].imageUrl = base64;
+      setPlan({ ...plan, locations: updatedLocs });
+    } catch (e) {
+      console.error(`Failed to regenerate location ${updatedLocs[locIndex].name}`, e);
     }
 
     setIsGeneratingChars(false);
@@ -309,8 +371,9 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
         // Logic: Try to use previous frame for "Edit", unless it failed or doesn't exist, then "Generate New"
         const prevImage = (i > 0 && !frames[i-1].error && frames[i-1].imageUrl) ? frames[i-1].imageUrl : null;
 
-        // Resolve active characters for this frame based on plan
+        // Resolve active characters and locations for this frame based on plan
         const activeChars = plan.characters.filter(c => frames[i].characterIds?.includes(c.id));
+        const activeLocs = plan.locations.filter(loc => frames[i].locationIds?.includes(loc.id));
 
         // Retry Loop
         for (let attempt = 0; attempt < 3; attempt++) {
@@ -326,9 +389,9 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
 
                  let imageBase64: string;
                  if (prevImage) {
-                    imageBase64 = await generateNextFrame(prevImage, description, aspectRatio, activeChars, visualStyle);
+                    imageBase64 = await generateNextFrame(prevImage, description, aspectRatio, activeChars, activeLocs, visualStyle);
                  } else {
-                    imageBase64 = await generateFirstFrame(description, aspectRatio, activeChars, visualStyle);
+                    imageBase64 = await generateFirstFrame(description, aspectRatio, activeChars, activeLocs, visualStyle);
                  }
 
                  frames[i].imageUrl = imageBase64;
@@ -407,6 +470,9 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
           const activeChars = plan.characters.filter(c =>
             frames[frameIndex].characterIds?.includes(c.id)
           );
+          const activeLocs = plan.locations.filter(loc =>
+            frames[frameIndex].locationIds?.includes(loc.id)
+          );
 
           let imageBase64: string;
 
@@ -416,10 +482,11 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
               description,
               aspectRatio,
               activeChars,
+              activeLocs,
               visualStyle
             );
           } else {
-            // This is a child - use transformation delta
+            // This is a child - use vision-based edit (same as linear mode now)
             const parentFrame = frames[node.parentIndex];
 
             // Validate parent has image (should always be true due to phased generation)
@@ -427,21 +494,13 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
               throw new Error(`Parent frame ${node.parentIndex} missing image`);
             }
 
-            if (!node.transformationDelta) {
-              // Generate transformation delta first
-              node.transformationDelta = await generateTransformationDelta(
-                parentFrame.description,
-                frames[frameIndex].description,
-                parentFrame.imageUrl
-              );
-            }
-
-            imageBase64 = await generateFrameFromParent(
+            // Use vision-based edit instructions (same approach as linear mode)
+            imageBase64 = await generateNextFrame(
               parentFrame.imageUrl,
-              node.transformationDelta,
               description,
               aspectRatio,
               activeChars,
+              activeLocs,
               visualStyle
             );
           }
@@ -977,6 +1036,22 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
     };
   }, []); // Empty deps - only cleanup on unmount
 
+  // Debug helper: expose stitch function to console
+  useEffect(() => {
+    (window as any).__stitchFinalVideo = () => {
+      console.log('🎬 Stitching', videoClips.length, 'clips...');
+      console.log('Ready clips:', videoClips.filter(c => c.status === 'ready').length);
+      stitchFinalVideo(videoClips);
+    };
+
+    (window as any).__videoClips = videoClips;
+
+    return () => {
+      delete (window as any).__stitchFinalVideo;
+      delete (window as any).__videoClips;
+    };
+  }, [videoClips]);
+
   // Check if we can show Phase 3
   const canGenerateVideos = storyboard.length > 0 && storyboard.every(f => f.imageUrl);
   const isVideoGenerating = videoState.isGenerating || videoState.isProcessing || videoState.isStitching;
@@ -1024,7 +1099,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
                  </div>
               </div>
 
-              <div className="mb-6 w-full max-w-2xl">
+              <div className="mb-6 w-full max-w-2xl space-y-4">
                 <label className="flex items-center gap-3 cursor-pointer">
                   <input
                     type="checkbox"
@@ -1035,6 +1110,19 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
                   <div className="flex-1">
                     <span className="text-slate-200 font-medium">Use Hierarchical Generation</span>
                     <p className="text-xs text-slate-500">Generate anchor frames first, then derive children for 3x faster generation</p>
+                  </div>
+                </label>
+
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={useConceptualMode}
+                    onChange={(e) => setUseConceptualMode(e.target.checked)}
+                    className="w-5 h-5 bg-slate-950 border-slate-700 rounded text-pink-500 focus:ring-2 focus:ring-pink-500"
+                  />
+                  <div className="flex-1">
+                    <span className="text-slate-200 font-medium">Conceptual Mode</span>
+                    <p className="text-xs text-slate-500">Symbolic, atmosphere-driven narrative that embodies the song's spirit (not literal lyric interpretation)</p>
                   </div>
                 </label>
               </div>
@@ -1054,7 +1142,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
       {plan && (
           <div className="space-y-8">
               
-              {/* Narrative & Characters */}
+              {/* Narrative, Characters & Locations */}
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                   {/* Narrative */}
                   <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-6">
@@ -1113,6 +1201,20 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
                             <p className="text-xs text-slate-500">Anchor frames + parallel generation (3x faster)</p>
                           </div>
                         </label>
+
+                        {/* Conceptual Mode Toggle */}
+                        <label className="flex items-center gap-3 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={useConceptualMode}
+                            onChange={(e) => setUseConceptualMode(e.target.checked)}
+                            className="w-4 h-4 bg-slate-950 border-slate-700 rounded text-pink-500 focus:ring-2 focus:ring-pink-500"
+                          />
+                          <div className="flex-1">
+                            <span className="text-slate-200 font-medium text-sm">Conceptual Mode</span>
+                            <p className="text-xs text-slate-500">Symbolic, atmosphere-driven narrative (not literal lyric interpretation)</p>
+                          </div>
+                        </label>
                       </div>
 
                       <div className="mt-6 flex flex-wrap items-center gap-4">
@@ -1159,40 +1261,103 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
                       </div>
                   </div>
 
-                  {/* Characters */}
-                  <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
-                      <div className="flex justify-between items-center mb-4">
-                          <h3 className="text-lg font-semibold text-slate-200">Cast</h3>
-                          {isGeneratingChars && <Loader2 className="w-4 h-4 text-pink-400 animate-spin" />}
-                      </div>
-                      <div className="space-y-4 max-h-[300px] overflow-y-auto pr-2">
-                          {plan.characters.map((char, charIndex) => (
-                              <div key={char.id} className="flex gap-3 items-start bg-slate-950 p-3 rounded-lg border border-slate-800">
-                                  <div className="w-12 h-12 bg-slate-900 rounded-md flex-shrink-0 overflow-hidden border border-slate-700 relative">
-                                      {char.imageUrl ? (
-                                          <img src={`data:image/jpeg;base64,${char.imageUrl}`} alt={char.name} className="w-full h-full object-cover" />
-                                      ) : (
-                                          <div className="w-full h-full flex items-center justify-center text-slate-600">
-                                              <User className="w-6 h-6" />
-                                          </div>
-                                      )}
-                                  </div>
-                                  <div className="flex-1">
-                                      <div className="text-sm font-medium text-slate-200">{char.name}</div>
-                                      <div className="text-xs text-slate-500 line-clamp-2">{char.description}</div>
-                                  </div>
-                                  {/* Generate/Regenerate button - always visible */}
+                  {/* Right Column: Characters & Locations */}
+                  <div className="space-y-6">
+                      {/* Characters */}
+                      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+                          <div className="flex justify-between items-center mb-4">
+                              <h3 className="text-lg font-semibold text-slate-200">Cast</h3>
+                              <div className="flex items-center gap-2">
+                                  {isGeneratingChars && <Loader2 className="w-4 h-4 text-pink-400 animate-spin" />}
                                   <button
-                                      onClick={() => regenerateCharacter(charIndex)}
+                                      onClick={() => generateCharacters(plan.characters)}
                                       disabled={isGeneratingChars}
-                                      className="p-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
-                                      title={char.imageUrl ? "Regenerate character" : "Generate character"}
+                                      className="p-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-xs flex items-center gap-1"
+                                      title="Regenerate all characters (3 at a time)"
                                   >
                                       <RefreshCw className="w-3 h-3 text-pink-400" />
+                                      <span className="text-pink-400">All</span>
                                   </button>
                               </div>
-                          ))}
+                          </div>
+                          <div className="space-y-4 max-h-[300px] overflow-y-auto pr-2">
+                              {plan.characters.map((char, charIndex) => (
+                                  <div key={char.id} className="flex gap-3 items-start bg-slate-950 p-3 rounded-lg border border-slate-800">
+                                      <div className="w-12 h-12 bg-slate-900 rounded-md flex-shrink-0 overflow-hidden border border-slate-700 relative">
+                                          {char.imageUrl ? (
+                                              <img src={`data:image/jpeg;base64,${char.imageUrl}`} alt={char.name} className="w-full h-full object-cover" />
+                                          ) : (
+                                              <div className="w-full h-full flex items-center justify-center text-slate-600">
+                                                  <User className="w-6 h-6" />
+                                              </div>
+                                          )}
+                                      </div>
+                                      <div className="flex-1">
+                                          <div className="text-sm font-medium text-slate-200">{char.name}</div>
+                                          <div className="text-xs text-slate-500 line-clamp-2">{char.description}</div>
+                                      </div>
+                                      {/* Generate/Regenerate button - always visible */}
+                                      <button
+                                          onClick={() => regenerateCharacter(charIndex)}
+                                          disabled={isGeneratingChars}
+                                          className="p-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                                          title={char.imageUrl ? "Regenerate character" : "Generate character"}
+                                      >
+                                          <RefreshCw className="w-3 h-3 text-pink-400" />
+                                      </button>
+                                  </div>
+                              ))}
+                          </div>
                       </div>
+
+                      {/* Locations */}
+                      {plan.locations && plan.locations.length > 0 && (
+                        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+                            <div className="flex justify-between items-center mb-4">
+                                <h3 className="text-lg font-semibold text-slate-200">Locations</h3>
+                                <div className="flex items-center gap-2">
+                                    {isGeneratingChars && <Loader2 className="w-4 h-4 text-pink-400 animate-spin" />}
+                                    <button
+                                        onClick={() => generateLocations(plan.locations)}
+                                        disabled={isGeneratingChars}
+                                        className="p-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-xs flex items-center gap-1"
+                                        title="Regenerate all locations (3 at a time)"
+                                    >
+                                        <RefreshCw className="w-3 h-3 text-pink-400" />
+                                        <span className="text-pink-400">All</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="space-y-4 max-h-[300px] overflow-y-auto pr-2">
+                                {plan.locations.map((loc, locIndex) => (
+                                    <div key={loc.id} className="flex gap-3 items-start bg-slate-950 p-3 rounded-lg border border-slate-800">
+                                        <div className="w-12 h-12 bg-slate-900 rounded-md flex-shrink-0 overflow-hidden border border-slate-700 relative">
+                                            {loc.imageUrl ? (
+                                                <img src={`data:image/jpeg;base64,${loc.imageUrl}`} alt={loc.name} className="w-full h-full object-cover" />
+                                            ) : (
+                                                <div className="w-full h-full flex items-center justify-center text-slate-600">
+                                                    <MapPin className="w-6 h-6" />
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="flex-1">
+                                            <div className="text-sm font-medium text-slate-200">{loc.name}</div>
+                                            <div className="text-xs text-slate-500 line-clamp-2">{loc.description}</div>
+                                        </div>
+                                        {/* Generate/Regenerate button - always visible */}
+                                        <button
+                                            onClick={() => regenerateLocation(locIndex)}
+                                            disabled={isGeneratingChars}
+                                            className="p-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                                            title={loc.imageUrl ? "Regenerate location" : "Generate location"}
+                                        >
+                                            <RefreshCw className="w-3 h-3 text-pink-400" />
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                      )}
                   </div>
               </div>
 
@@ -1217,6 +1382,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
                           index={index}
                           hierarchyNode={hierarchyTree?.nodes[index]}
                           characters={plan.characters}
+                          locations={plan.locations || []}
                           aspectRatio={aspectRatio}
                           isSelected={selectedFrameIndex === index}
                           isGenerating={isGeneratingFrames}
