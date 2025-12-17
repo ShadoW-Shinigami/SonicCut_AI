@@ -956,6 +956,11 @@ const buildHierarchyTree = (
     }
   });
 
+  // Deduplicate childIndices arrays (edge case: Gemini might return duplicate relationships)
+  nodes.forEach(node => {
+    node.childIndices = [...new Set(node.childIndices)];
+  });
+
   // Calculate depths properly (after all relationships are set)
   const calculateDepth = (nodeIndex: number): number => {
     const node = nodes[nodeIndex];
