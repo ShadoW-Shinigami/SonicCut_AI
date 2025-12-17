@@ -1,23 +1,64 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { AudioAnalysis, Marker, AspectRatio, VideoPlan, StoryboardFrame, Character, VideoClip, VideoGenerationState } from '../types';
-import { generateVideoNarrative, generateCharacterSheet, generateFirstFrame, generateNextFrame, sanitizePrompt } from '../services/geminiService';
+import { AudioAnalysis, Marker, AspectRatio, VideoPlan, StoryboardFrame, Character, VideoClip, VideoGenerationState, HierarchyTree } from '../types';
+import { generateVideoNarrative, generateCharacterSheet, generateFirstFrame, generateNextFrame, sanitizePrompt, generateHierarchicalPlan, generateTransformationDelta, generateFrameFromParent, adjustShotCount } from '../services/geminiService';
 import { generateVideoClip, selectVideoDuration, calculateSpeedFactor, fetchVideoAsBlob } from '../services/klingService';
 import { generateBlackFrame, applySpeedRamp, stitchVideos, getFFmpeg, isFFmpegLoaded, createVideoUrl, revokeVideoUrl } from '../services/videoProcessingService';
-import { Clapperboard, Film, User, Loader2, PlaySquare, ArrowRight, LayoutTemplate, Package, StopCircle, RefreshCw, PlayCircle, AlertTriangle, Video, Download, Pause, Play } from 'lucide-react';
+import { Clapperboard, Film, User, Loader2, PlaySquare, ArrowRight, LayoutTemplate, Package, StopCircle, RefreshCw, PlayCircle, AlertTriangle, Video, Download, Pause, Play, X, MessageSquare } from 'lucide-react';
+import { FrameCard } from './FrameCard';
+import { DetailsPanel } from './DetailsPanel';
 import JSZip from 'jszip';
 
 interface VideoPlannerProps {
   analysis: AudioAnalysis;
   markers: Marker[];
   audioDuration: number;
+  // Phase 2 state (controlled by parent)
+  aspectRatio: AspectRatio;
+  setAspectRatio: (ratio: AspectRatio) => void;
+  visualStyle: string;
+  setVisualStyle: (style: string) => void;
+  videoPlan: VideoPlan | null;
+  setVideoPlan: (plan: VideoPlan | null) => void;
+  storyboard: StoryboardFrame[];
+  setStoryboard: (frames: StoryboardFrame[]) => void;
+  // Hierarchy state (controlled by parent)
+  hierarchyTree: HierarchyTree | null;
+  setHierarchyTree: (tree: HierarchyTree | null) => void;
+  useHierarchy: boolean;
+  setUseHierarchy: (use: boolean) => void;
+  // Phase 3 state (controlled by parent)
+  videoClips: VideoClip[];
+  setVideoClips: (clips: VideoClip[]) => void;
+  finalVideoBlob: Blob | null;
+  setFinalVideoBlob: (blob: Blob | null) => void;
+  onStoryboardUpdate?: () => Promise<void>;
 }
 
-const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDuration }) => {
-  // State
-  const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9');
-  const [visualStyle, setVisualStyle] = useState<string>("Cinematic, High Contrast, Neo-Noir");
-  const [plan, setPlan] = useState<VideoPlan | null>(null);
-  const [storyboard, setStoryboard] = useState<StoryboardFrame[]>([]);
+const VideoPlanner: React.FC<VideoPlannerProps> = ({
+  analysis,
+  markers,
+  audioDuration,
+  aspectRatio,
+  setAspectRatio,
+  visualStyle,
+  setVisualStyle,
+  videoPlan,
+  setVideoPlan,
+  storyboard,
+  setStoryboard,
+  hierarchyTree,
+  setHierarchyTree,
+  useHierarchy,
+  setUseHierarchy,
+  videoClips,
+  setVideoClips,
+  finalVideoBlob,
+  setFinalVideoBlob,
+  onStoryboardUpdate
+}) => {
+  // Rename plan to videoPlan for consistency with props
+  const plan = videoPlan;
+  const setPlan = setVideoPlan;
 
   // Loading States
   const [isPlanning, setIsPlanning] = useState(false);
@@ -25,11 +66,18 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
   const [isGeneratingFrames, setIsGeneratingFrames] = useState(false);
   const [generationProgress, setGenerationProgress] = useState(0);
 
+  // Feedback Dialog State
+  const [showFeedbackDialog, setShowFeedbackDialog] = useState(false);
+  const [feedbackText, setFeedbackText] = useState('');
+
   // Stop Control
   const stopRef = useRef<boolean>(false);
 
-  // Phase 3: Video Generation State
-  const [videoClips, setVideoClips] = useState<VideoClip[]>([]);
+  // Selection State (local)
+  const [selectedFrameIndex, setSelectedFrameIndex] = useState<number | null>(null);
+
+  // Phase 3: Video Generation State (UI only)
+  // videoClips and finalVideoBlob are now controlled by parent
   const [videoState, setVideoState] = useState<VideoGenerationState>({
     clips: [],
     isGenerating: false,
@@ -43,6 +91,26 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
   const [clipVideoUrls, setClipVideoUrls] = useState<{ [key: string]: string }>({});
   const videoStopRef = useRef<boolean>(false);
 
+  // Recreate blob URLs from saved blobs on mount/load
+  useEffect(() => {
+    // Recreate final video URL from blob
+    if (finalVideoBlob && !finalVideoUrl) {
+      const url = createVideoUrl(finalVideoBlob);
+      setFinalVideoUrl(url);
+    }
+
+    // Recreate clip URLs from blobs
+    const newClipUrls: { [key: string]: string } = {};
+    videoClips.forEach(clip => {
+      if (clip.processedVideoBlob && !clipVideoUrls[clip.id]) {
+        newClipUrls[clip.id] = createVideoUrl(clip.processedVideoBlob);
+      }
+    });
+    if (Object.keys(newClipUrls).length > 0) {
+      setClipVideoUrls(prev => ({ ...prev, ...newClipUrls }));
+    }
+  }, [finalVideoBlob, videoClips]);
+
   // Step 1: Generate Plan (Text & Characters)
   const handleGeneratePlan = async () => {
     if (markers.length === 0) {
@@ -51,8 +119,21 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
     }
     setIsPlanning(true);
     try {
-      const videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio);
-      
+      let videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio);
+
+      // Auto-fix shot count mismatch
+      if (videoPlan.scenes.length !== markers.length) {
+        console.warn(`Shot count mismatch: ${videoPlan.scenes.length} shots vs ${markers.length} markers. Auto-fixing...`);
+        try {
+          videoPlan = await adjustShotCount(videoPlan, markers.length);
+          console.log(`✓ Fixed! Now have ${videoPlan.scenes.length} shots`);
+        } catch (e) {
+          console.error("Failed to adjust shot count:", e);
+          alert(`Error: Generated ${videoPlan.scenes.length} shots but expected ${markers.length}, and auto-fix failed. Please try again.`);
+          return;
+        }
+      }
+
       // Inject time from markers
       const scenesWithTime = videoPlan.scenes.map((scene, idx) => ({
           ...scene,
@@ -65,6 +146,25 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
       setPlan({ ...videoPlan, scenes: scenesWithTime });
       setStoryboard(scenesWithTime);
 
+      // Generate hierarchy if enabled
+      console.log("useHierarchy flag:", useHierarchy);
+      if (useHierarchy) {
+        console.log("Starting hierarchy generation...");
+        try {
+          const hierarchy = await generateHierarchicalPlan(videoPlan);
+          setHierarchyTree(hierarchy);
+          console.log("Hierarchy generated and set successfully");
+        } catch (e) {
+          console.error("Failed to generate hierarchy:", e);
+          alert("Failed to generate hierarchical structure. Falling back to sequential generation.");
+          setUseHierarchy(false);
+          setHierarchyTree(null);
+        }
+      } else {
+        console.log("Hierarchy disabled, skipping hierarchy generation");
+        setHierarchyTree(null);
+      }
+
       // Trigger character generation immediately after plan is ready
       generateCharacters(videoPlan.characters);
 
@@ -76,10 +176,87 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
     }
   };
 
+  const handleRegeneratePlan = async () => {
+    // Check if storyboard has any generated frames
+    const hasGeneratedFrames = storyboard.some(f => f.imageUrl);
+
+    if (hasGeneratedFrames) {
+      const confirmed = window.confirm(
+        "Regenerating the narrative will reset all storyboard frames. This action cannot be undone. Continue?"
+      );
+      if (!confirmed) return;
+    }
+
+    // Show feedback dialog
+    setFeedbackText(''); // Reset feedback
+    setShowFeedbackDialog(true);
+  };
+
+  const performRegeneratePlan = async (feedback?: string) => {
+    setShowFeedbackDialog(false);
+    setIsPlanning(true);
+    try {
+      let videoPlan = await generateVideoNarrative(analysis, markers.length, aspectRatio, feedback);
+
+      // Auto-fix shot count mismatch
+      if (videoPlan.scenes.length !== markers.length) {
+        console.warn(`Shot count mismatch: ${videoPlan.scenes.length} shots vs ${markers.length} markers. Auto-fixing...`);
+        try {
+          videoPlan = await adjustShotCount(videoPlan, markers.length);
+          console.log(`✓ Fixed! Now have ${videoPlan.scenes.length} shots`);
+        } catch (e) {
+          console.error("Failed to adjust shot count:", e);
+          alert(`Error: Generated ${videoPlan.scenes.length} shots but expected ${markers.length}, and auto-fix failed. Please try again.`);
+          return;
+        }
+      }
+
+      // Inject time from markers
+      const scenesWithTime = videoPlan.scenes.map((scene, idx) => ({
+          ...scene,
+          markerId: markers[idx].id,
+          startTime: markers[idx].time,
+          imageUrl: undefined,
+          isGenerating: false
+      }));
+
+      setPlan({ ...videoPlan, scenes: scenesWithTime });
+      setStoryboard(scenesWithTime);
+
+      // Generate hierarchy if enabled
+      console.log("useHierarchy flag:", useHierarchy);
+      if (useHierarchy) {
+        console.log("Starting hierarchy generation...");
+        try {
+          const hierarchy = await generateHierarchicalPlan(videoPlan);
+          setHierarchyTree(hierarchy);
+          console.log("Hierarchy generated and set successfully");
+        } catch (e) {
+          console.error("Failed to generate hierarchy:", e);
+          alert("Failed to generate hierarchical structure. Falling back to sequential generation.");
+          setUseHierarchy(false);
+          setHierarchyTree(null);
+        }
+      } else {
+        console.log("Hierarchy disabled, skipping hierarchy generation");
+        setHierarchyTree(null);
+      }
+
+      // Trigger character generation immediately after plan is ready
+      generateCharacters(videoPlan.characters);
+
+    } catch (e) {
+      console.error(e);
+      alert("Failed to regenerate video plan.");
+    } finally {
+      setIsPlanning(false);
+    }
+  };
+
   const generateCharacters = async (chars: Character[]) => {
     setIsGeneratingChars(true);
     const updatedChars = [...chars];
-    
+
     for (let i = 0; i < updatedChars.length; i++) {
         try {
             const base64 = await generateCharacterSheet(updatedChars[i], visualStyle);
@@ -90,6 +267,23 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
             console.error(`Failed to generate char ${updatedChars[i].name}`, e);
         }
     }
+    setIsGeneratingChars(false);
+  };
+
+  const regenerateCharacter = async (charIndex: number) => {
+    if (!plan) return;
+
+    setIsGeneratingChars(true);
+    const updatedChars = [...plan.characters];
+
+    try {
+      const base64 = await generateCharacterSheet(updatedChars[charIndex], visualStyle);
+      updatedChars[charIndex].imageUrl = base64;
+      setPlan({ ...plan, characters: updatedChars });
+    } catch (e) {
+      console.error(`Failed to regenerate char ${updatedChars[charIndex].name}`, e);
+    }
+
     setIsGeneratingChars(false);
   };
 
@@ -158,9 +352,192 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
 
         setGenerationProgress(((i + 1) / frames.length) * 100);
         setStoryboard([...frames]);
+
+        // Trigger autosave after each frame
+        if (onStoryboardUpdate) {
+          await onStoryboardUpdate();
+        }
     }
 
     setIsGeneratingFrames(false);
+  };
+
+  // Hierarchical frame generation with tiered/phased approach
+  const processFramesHierarchical = async () => {
+    if (!plan || !hierarchyTree) return;
+
+    stopRef.current = false;
+    setIsGeneratingFrames(true);
+    setGenerationProgress(0);
+
+    const frames = [...storyboard];
+    const totalFrames = frames.length;
+    let completedCount = 0;
+    const MAX_CONCURRENT = 3;
+
+    // Helper to generate a single frame
+    const generateFrame = async (frameIndex: number): Promise<boolean> => {
+      if (stopRef.current) return false;
+
+      const node = hierarchyTree.nodes[frameIndex];
+
+      // Skip if already generated (for selective regeneration)
+      if (frames[frameIndex].imageUrl && !frames[frameIndex].error) {
+        return true;
+      }
+
+      frames[frameIndex].isGenerating = true;
+      frames[frameIndex].error = undefined;
+      setStoryboard([...frames]);
+
+      let success = false;
+
+      // 3-attempt retry with progressive sanitization
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (stopRef.current) break;
+
+        try {
+          let description = frames[frameIndex].description;
+          if (attempt === 1) {
+            description = await sanitizePrompt(description, 'moderate');
+          } else if (attempt === 2) {
+            description = await sanitizePrompt(description, 'strict');
+          }
+
+          const activeChars = plan.characters.filter(c =>
+            frames[frameIndex].characterIds?.includes(c.id)
+          );
+
+          let imageBase64: string;
+
+          if (node.parentIndex === null) {
+            // This is a parent - generate normally
+            imageBase64 = await generateFirstFrame(
+              description,
+              aspectRatio,
+              activeChars,
+              visualStyle
+            );
+          } else {
+            // This is a child - use transformation delta
+            const parentFrame = frames[node.parentIndex];
+
+            // Validate parent has image (should always be true due to phased generation)
+            if (!parentFrame.imageUrl) {
+              throw new Error(`Parent frame ${node.parentIndex} missing image`);
+            }
+
+            if (!node.transformationDelta) {
+              // Generate transformation delta first
+              node.transformationDelta = await generateTransformationDelta(
+                parentFrame.description,
+                frames[frameIndex].description,
+                parentFrame.imageUrl
+              );
+            }
+
+            imageBase64 = await generateFrameFromParent(
+              parentFrame.imageUrl,
+              node.transformationDelta,
+              description,
+              aspectRatio,
+              activeChars,
+              visualStyle
+            );
+          }
+
+          frames[frameIndex].imageUrl = imageBase64;
+          success = true;
+          break;
+        } catch (e) {
+          console.warn(`Frame ${frameIndex} attempt ${attempt + 1} failed`, e);
+        }
+      }
+
+      frames[frameIndex].isGenerating = false;
+
+      if (!success && !stopRef.current) {
+        frames[frameIndex].error = "Generation Failed";
+        frames[frameIndex].imageUrl = undefined;
+      }
+
+      setStoryboard([...frames]);
+
+      if (onStoryboardUpdate) {
+        await onStoryboardUpdate();
+      }
+
+      return success;
+    };
+
+    // Generate frames phase by phase (depth 0, then 1, then 2, etc.)
+    for (let currentDepth = 0; currentDepth <= hierarchyTree.maxDepth; currentDepth++) {
+      if (stopRef.current) break;
+
+      // Get all frames at this depth
+      const framesAtDepth = hierarchyTree.nodes
+        .filter(node => node.depth === currentDepth)
+        .map(node => node.frameIndex);
+
+      if (framesAtDepth.length === 0) continue;
+
+      console.log(`Phase ${currentDepth}: Generating ${framesAtDepth.length} frames (depth ${currentDepth})`);
+
+      // Generate frames at this depth in batches of 3 (parallel)
+      for (let i = 0; i < framesAtDepth.length; i += MAX_CONCURRENT) {
+        if (stopRef.current) break;
+
+        const batch = framesAtDepth.slice(i, i + MAX_CONCURRENT);
+
+        // Generate batch in parallel
+        await Promise.all(batch.map(frameIdx => generateFrame(frameIdx)));
+
+        completedCount += batch.length;
+        setGenerationProgress((completedCount / totalFrames) * 100);
+      }
+    }
+
+    setIsGeneratingFrames(false);
+  };
+
+  // Cascade regeneration - regenerate frame and all descendants
+  const handleRegenerateFrame = async (frameIndex: number) => {
+    if (!hierarchyTree || !plan) return;
+
+    const collectDescendants = (idx: number): number[] => {
+      const descendants: number[] = [];
+      const queue = [...hierarchyTree.nodes[idx].childIndices];
+
+      while (queue.length > 0) {
+        const childIdx = queue.shift()!;
+        descendants.push(childIdx);
+        queue.push(...hierarchyTree.nodes[childIdx].childIndices);
+      }
+
+      return descendants;
+    };
+
+    const descendants = collectDescendants(frameIndex);
+    const totalAffected = 1 + descendants.length;
+
+    // Always cascade - confirm with user
+    if (descendants.length > 0) {
+      const confirmed = window.confirm(
+        `Regenerating this frame will also regenerate ${descendants.length} dependent frame${descendants.length > 1 ? 's' : ''} (${totalAffected} total). Continue?`
+      );
+      if (!confirmed) return;
+    }
+
+    // Clear images for this frame + all descendants
+    const frames = [...storyboard];
+    [frameIndex, ...descendants].forEach(idx => {
+      frames[idx].imageUrl = undefined;
+      frames[idx].error = undefined;
+    });
+    setStoryboard(frames);
+
+    // Regenerate using hierarchical generation
+    await processFramesHierarchical();
   };
 
   const handleStop = () => {
@@ -270,7 +647,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
     }
   };
 
-  // Phase 3: Generate all videos
+  // Phase 3: Generate all videos with pipelined processing
   const handleGenerateVideos = async () => {
     if (!plan || storyboard.length === 0) return;
     if (!storyboard.every(f => f.imageUrl)) {
@@ -293,9 +670,66 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
       progress: 0
     }));
 
-    // Step 1: Generate videos from Kling API (2 at a time)
+    // Pipelined generation + processing
     const CONCURRENT_GENERATIONS = 2;
+    const CONCURRENT_PROCESSING = 1; // FFmpeg is heavy, keep at 1
 
+    // Processing queue
+    const processingQueue: number[] = [];
+    let activeProcessing = 0;
+    let generatedCount = 0;
+    let processedCount = 0;
+
+    // Process next clip in queue
+    const processNextClip = async () => {
+      if (processingQueue.length === 0 || videoStopRef.current) return;
+
+      activeProcessing++;
+      const clipIndex = processingQueue.shift()!;
+
+      try {
+        clips[clipIndex].status = 'processing';
+        setVideoClips([...clips]);
+
+        // Fetch video as blob
+        const videoBlob = await fetchVideoAsBlob(clips[clipIndex].generatedVideoUrl!);
+
+        // Apply speed ramp
+        const processedBlob = await applySpeedRamp(
+          videoBlob,
+          clips[clipIndex].speedFactor
+        );
+
+        clips[clipIndex].processedVideoBlob = processedBlob;
+        clips[clipIndex].status = 'ready';
+
+        // Create URL for preview
+        const previewUrl = createVideoUrl(processedBlob);
+        setClipVideoUrls(prev => ({ ...prev, [clips[clipIndex].id]: previewUrl }));
+
+        processedCount++;
+        setVideoClips([...clips]);
+
+        // Update progress (generation 50%, processing 50%)
+        const totalProgress = (generatedCount / clips.length) * 50 + (processedCount / clips.length) * 50;
+        setVideoState(prev => ({ ...prev, progress: totalProgress }));
+
+      } catch (e) {
+        console.error(`Speed processing failed for shot ${clipIndex + 1}:`, e);
+        clips[clipIndex].status = 'error';
+        clips[clipIndex].error = `Speed processing failed: ${(e as Error).message}`;
+        setVideoClips([...clips]);
+      }
+
+      activeProcessing--;
+
+      // Process next in queue if available
+      if (processingQueue.length > 0 && activeProcessing < CONCURRENT_PROCESSING) {
+        processNextClip();
+      }
+    };
+
+    // Step 1: Generate videos with immediate processing
     for (let i = 0; i < clips.length; i += CONCURRENT_GENERATIONS) {
       if (videoStopRef.current) break;
 
@@ -339,8 +773,15 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
             });
 
             clips[clipIndex].generatedVideoUrl = result.videoUrl;
-            clips[clipIndex].status = 'processing';
             success = true;
+            generatedCount++;
+
+            // Add to processing queue immediately
+            processingQueue.push(clipIndex);
+            if (activeProcessing < CONCURRENT_PROCESSING) {
+              processNextClip();
+            }
+
             break; // Success, exit retry loop
           } catch (e) {
             console.warn(`Video generation for shot ${clipIndex + 1} attempt ${attempt + 1} failed:`, e);
@@ -351,79 +792,26 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
         if (!success && !videoStopRef.current) {
           clips[clipIndex].status = 'error';
           clips[clipIndex].error = "Generation failed after 3 attempts";
+          generatedCount++;
         }
 
         setVideoClips([...clips]);
       }));
-
-      // Update progress after batch completes
-      const completedCount = Math.min(i + CONCURRENT_GENERATIONS, clips.length);
-      setVideoState(prev => ({
-        ...prev,
-        progress: (completedCount / clips.length) * 33
-      }));
     }
 
-    // Step 2: Process speed ramping
-    if (!videoStopRef.current) {
-      await processSpeedRamping(clips);
-    } else {
-      setVideoState(prev => ({
-        ...prev,
-        isGenerating: false,
-        currentPhase: 'idle'
-      }));
-    }
-  };
-
-  // Phase 3: Apply speed ramping to all clips
-  const processSpeedRamping = async (clips: VideoClip[]) => {
-    setVideoState(prev => ({
-      ...prev,
-      isProcessing: true,
-      currentPhase: 'processing'
-    }));
-
-    for (let i = 0; i < clips.length; i++) {
+    // Wait for all processing to complete
+    while (activeProcessing > 0 || processingQueue.length > 0) {
       if (videoStopRef.current) break;
-      if (clips[i].status !== 'processing' || !clips[i].generatedVideoUrl) continue;
-
-      try {
-        // Fetch video as blob
-        const videoBlob = await fetchVideoAsBlob(clips[i].generatedVideoUrl!);
-
-        // Apply speed ramp
-        const processedBlob = await applySpeedRamp(
-          videoBlob,
-          clips[i].speedFactor
-        );
-
-        clips[i].processedVideoBlob = processedBlob;
-        clips[i].status = 'ready';
-
-        // Create URL for preview
-        const previewUrl = createVideoUrl(processedBlob);
-        setClipVideoUrls(prev => ({ ...prev, [clips[i].id]: previewUrl }));
-      } catch (e) {
-        console.error(`Speed processing failed for shot ${i + 1}:`, e);
-        clips[i].status = 'error';
-        clips[i].error = `Speed processing failed: ${(e as Error).message}`;
-      }
-
-      setVideoClips([...clips]);
-      setVideoState(prev => ({
-        ...prev,
-        progress: 33 + ((i + 1) / clips.length) * 33
-      }));
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
 
-    // Step 3: Stitch final video
+    // Step 2: Stitch final video
     if (!videoStopRef.current) {
       await stitchFinalVideo(clips);
     } else {
       setVideoState(prev => ({
         ...prev,
-        isProcessing: false,
+        isGenerating: false,
         currentPhase: 'idle'
       }));
     }
@@ -463,6 +851,7 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
       }
 
       setFinalVideoUrl(url);
+      setFinalVideoBlob(finalBlob); // Save blob to parent state for persistence
       setVideoState(prev => ({
         ...prev,
         currentPhase: 'complete',
@@ -633,7 +1022,22 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
                  </div>
               </div>
 
-              <button 
+              <div className="mb-6 w-full max-w-2xl">
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={useHierarchy}
+                    onChange={(e) => setUseHierarchy(e.target.checked)}
+                    className="w-5 h-5 bg-slate-950 border-slate-700 rounded text-pink-500 focus:ring-2 focus:ring-pink-500"
+                  />
+                  <div className="flex-1">
+                    <span className="text-slate-200 font-medium">Use Hierarchical Generation</span>
+                    <p className="text-xs text-slate-500">Generate anchor frames first, then derive children for 3x faster generation</p>
+                  </div>
+                </label>
+              </div>
+
+              <button
                 onClick={handleGeneratePlan}
                 disabled={isPlanning}
                 className="btn-primary px-8 py-3 bg-pink-600 hover:bg-pink-500 text-white rounded-xl font-semibold shadow-lg shadow-pink-900/20 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -652,14 +1056,68 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                   {/* Narrative */}
                   <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-6">
-                      <h3 className="text-lg font-semibold text-slate-200 mb-2">Narrative Arc</h3>
+                      <div className="flex items-center justify-between mb-2">
+                        <h3 className="text-lg font-semibold text-slate-200">Narrative Arc</h3>
+                        <button
+                          onClick={handleRegeneratePlan}
+                          disabled={isPlanning || isGeneratingFrames}
+                          className="p-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Regenerate narrative"
+                        >
+                          <RefreshCw className={`w-4 h-4 text-pink-400 ${isPlanning ? 'animate-spin' : ''}`} />
+                        </button>
+                      </div>
                       <p className="text-slate-400 leading-relaxed text-sm">{plan.narrativeSummary}</p>
-                      
+
+                      {/* Settings - Always Editable */}
+                      <div className="mt-4 space-y-3 pb-4 border-b border-slate-800">
+                        <div className="flex flex-col sm:flex-row gap-3">
+                          <div className="flex-1">
+                            <label className="block text-xs text-slate-500 uppercase font-bold mb-1">Aspect Ratio</label>
+                            <select
+                              value={aspectRatio}
+                              onChange={(e) => setAspectRatio(e.target.value as AspectRatio)}
+                              className="w-full bg-slate-950 border border-slate-700 text-slate-100 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-pink-500 focus:outline-none"
+                            >
+                              <option value="16:9">16:9</option>
+                              <option value="9:16">9:16</option>
+                              <option value="4:3">4:3</option>
+                              <option value="1:1">1:1</option>
+                              <option value="21:9">21:9</option>
+                            </select>
+                          </div>
+                          <div className="flex-[2]">
+                            <label className="block text-xs text-slate-500 uppercase font-bold mb-1">Visual Style</label>
+                            <input
+                              type="text"
+                              value={visualStyle}
+                              onChange={(e) => setVisualStyle(e.target.value)}
+                              placeholder="e.g. Cyberpunk, Watercolor..."
+                              className="w-full bg-slate-950 border border-slate-700 text-slate-100 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-pink-500 focus:outline-none"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Hierarchy Toggle */}
+                        <label className="flex items-center gap-3 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={useHierarchy}
+                            onChange={(e) => setUseHierarchy(e.target.checked)}
+                            className="w-4 h-4 bg-slate-950 border-slate-700 rounded text-pink-500 focus:ring-2 focus:ring-pink-500"
+                          />
+                          <div className="flex-1">
+                            <span className="text-slate-200 font-medium text-sm">Use Hierarchical Generation</span>
+                            <p className="text-xs text-slate-500">Anchor frames + parallel generation (3x faster)</p>
+                          </div>
+                        </label>
+                      </div>
+
                       <div className="mt-6 flex flex-wrap items-center gap-4">
                            {/* Generate / Stop Controls */}
                            {!isGeneratingFrames ? (
-                               <button 
-                                    onClick={() => processFrames(0)}
+                               <button
+                                    onClick={() => useHierarchy && hierarchyTree ? processFramesHierarchical() : processFrames(0)}
                                     className="px-6 py-2 bg-pink-600 hover:bg-pink-500 text-white rounded-lg font-semibold shadow-lg shadow-pink-900/20 transition-all flex items-center gap-2 disabled:opacity-50"
                                 >
                                     <PlaySquare className="w-5 h-5" />
@@ -706,9 +1164,9 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
                           {isGeneratingChars && <Loader2 className="w-4 h-4 text-pink-400 animate-spin" />}
                       </div>
                       <div className="space-y-4 max-h-[300px] overflow-y-auto pr-2">
-                          {plan.characters.map((char) => (
+                          {plan.characters.map((char, charIndex) => (
                               <div key={char.id} className="flex gap-3 items-start bg-slate-950 p-3 rounded-lg border border-slate-800">
-                                  <div className="w-12 h-12 bg-slate-900 rounded-md flex-shrink-0 overflow-hidden border border-slate-700">
+                                  <div className="w-12 h-12 bg-slate-900 rounded-md flex-shrink-0 overflow-hidden border border-slate-700 relative">
                                       {char.imageUrl ? (
                                           <img src={`data:image/jpeg;base64,${char.imageUrl}`} alt={char.name} className="w-full h-full object-cover" />
                                       ) : (
@@ -717,128 +1175,88 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
                                           </div>
                                       )}
                                   </div>
-                                  <div>
+                                  <div className="flex-1">
                                       <div className="text-sm font-medium text-slate-200">{char.name}</div>
                                       <div className="text-xs text-slate-500 line-clamp-2">{char.description}</div>
                                   </div>
+                                  {/* Generate/Regenerate button - always visible */}
+                                  <button
+                                      onClick={() => regenerateCharacter(charIndex)}
+                                      disabled={isGeneratingChars}
+                                      className="p-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                                      title={char.imageUrl ? "Regenerate character" : "Generate character"}
+                                  >
+                                      <RefreshCw className="w-3 h-3 text-pink-400" />
+                                  </button>
                               </div>
                           ))}
                       </div>
                   </div>
               </div>
 
-              {/* Timeline / Storyboard Strip */}
-              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 overflow-hidden">
+              {/* Split View: Timeline (70%) + Details Panel (30%) */}
+              <div className="flex gap-6">
+                {/* Left: Timeline Grid (70%) */}
+                <div className={`bg-slate-950 border border-slate-800 rounded-2xl p-6 overflow-hidden ${selectedFrameIndex !== null ? 'flex-[7]' : 'flex-1'}`}>
                   <h3 className="text-lg font-semibold text-slate-200 mb-4 flex items-center gap-2">
-                      <Film className="w-5 h-5 text-slate-400" /> Storyboard Timeline
+                    <Film className="w-5 h-5 text-slate-400" /> Storyboard Timeline
+                    {hierarchyTree && (
+                      <span className="text-xs text-slate-500 ml-2">
+                        ({hierarchyTree.parentIndices.length} anchors, depth {hierarchyTree.maxDepth})
+                      </span>
+                    )}
                   </h3>
-                  
+
                   <div className="flex gap-4 overflow-x-auto pb-6 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900">
-                      {storyboard.map((frame, index) => (
-                          <div key={frame.id} className="flex-shrink-0 flex items-center">
-                              {/* The Frame Card */}
-                              <div className="w-64 bg-slate-900 rounded-xl border border-slate-800 overflow-hidden flex flex-col relative group/card">
-                                   
-                                   {/* Header */}
-                                   <div className="px-3 py-2 bg-slate-800/50 border-b border-slate-800 flex justify-between items-center">
-                                       <span className="text-xs font-mono text-pink-400">Shot {index + 1}</span>
-                                       <span className="text-xs font-mono text-slate-500">{frame.startTime.toFixed(2)}s</span>
-                                   </div>
-                                   
-                                   {/* Image Area */}
-                                   <div className={`w-full aspect-video bg-black relative flex items-center justify-center ${aspectRatio === '9:16' ? 'aspect-[9/16]' : aspectRatio === '1:1' ? 'aspect-square' : ''}`}>
-                                       {/* Active Characters Tag - Visual Verification */}
-                                       <div className="absolute top-2 left-2 flex gap-1 flex-wrap z-10 pointer-events-none">
-                                            {frame.characterIds?.map(cid => {
-                                                const char = plan.characters.find(c => c.id === cid);
-                                                return char ? (
-                                                    <span key={cid} className="text-[8px] bg-black/60 text-white px-2 py-0.5 rounded backdrop-blur-md border border-white/10">
-                                                        {char.name}
-                                                    </span>
-                                                ) : null;
-                                            })}
-                                       </div>
+                    {storyboard.map((frame, index) => (
+                      <React.Fragment key={frame.id}>
+                        <FrameCard
+                          frame={frame}
+                          index={index}
+                          hierarchyNode={hierarchyTree?.nodes[index]}
+                          characters={plan.characters}
+                          aspectRatio={aspectRatio}
+                          isSelected={selectedFrameIndex === index}
+                          isGenerating={isGeneratingFrames}
+                          onSelect={() => setSelectedFrameIndex(selectedFrameIndex === index ? null : index)}
+                          onRegenerate={() => useHierarchy && hierarchyTree ? handleRegenerateFrame(index) : processFrames(index)}
+                        />
 
-                                       {frame.imageUrl ? (
-                                           <img src={`data:image/jpeg;base64,${frame.imageUrl}`} alt="Scene" className="w-full h-full object-cover" />
-                                       ) : frame.isGenerating ? (
-                                           <div className="flex flex-col items-center gap-2">
-                                               <Loader2 className="w-8 h-8 text-pink-500 animate-spin" />
-                                               <span className="text-xs text-pink-500 font-mono">Generating...</span>
-                                           </div>
-                                       ) : frame.error ? (
-                                            <div className="flex flex-col items-center gap-2 text-red-400 p-2 text-center">
-                                                <AlertTriangle className="w-8 h-8" />
-                                                <span className="text-xs font-bold">Failed</span>
-                                                <span className="text-[10px] opacity-70">After 3 attempts</span>
-                                            </div>
-                                       ) : (
-                                           <span className="text-xs text-slate-600">Waiting to render</span>
-                                       )}
-                                       
-                                       {/* Hover Desc */}
-                                       <div className="absolute inset-0 bg-black/80 p-4 opacity-0 group-hover/card:opacity-100 transition-opacity flex flex-col justify-between text-center">
-                                           <div className="flex-1 flex items-center justify-center overflow-hidden">
-                                             <p className="text-xs text-slate-300 line-clamp-5">{frame.description}</p>
-                                           </div>
-
-                                           {/* Action Buttons on Hover - Always visible at bottom */}
-                                           <div className="flex gap-2 mt-2 flex-shrink-0">
-                                              <button 
-                                                  onClick={() => processFrames(index)}
-                                                  disabled={isGeneratingFrames}
-                                                  title="Regenerate this frame (and continue)"
-                                                  className="p-2 bg-indigo-600 hover:bg-indigo-500 rounded-full text-white disabled:opacity-50"
-                                              >
-                                                  <RefreshCw className="w-4 h-4" />
-                                              </button>
-                                              <button
-                                                  onClick={() => processFrames(index)}
-                                                  disabled={isGeneratingFrames}
-                                                  title="Continue generating from here"
-                                                  className="p-2 bg-emerald-600 hover:bg-emerald-500 rounded-full text-white disabled:opacity-50"
-                                              >
-                                                  <PlayCircle className="w-4 h-4" />
-                                              </button>
-                                           </div>
-                                       </div>
-                                   </div>
-
-                                   {/* Footer */}
-                                   <div className="p-3 bg-slate-900 relative">
-                                       <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Transition Prompt</div>
-                                       <p className="text-xs text-indigo-300 line-clamp-3">{frame.interpolationPrompt}</p>
-                                       
-                                       {/* Manual Retry Button if Error */}
-                                       {frame.error && !isGeneratingFrames && (
-                                            <button 
-                                                onClick={() => processFrames(index)}
-                                                className="absolute inset-0 bg-slate-900/90 flex items-center justify-center gap-2 text-red-400 hover:text-red-300 font-bold text-xs transition-colors"
-                                            >
-                                                <RefreshCw className="w-3 h-3" /> Retry Frame
-                                            </button>
-                                       )}
-                                   </div>
-                              </div>
-
-                              {/* Arrow to next */}
-                              {index < storyboard.length - 1 && (
-                                  <div className="mx-2 text-slate-700">
-                                      <ArrowRight className="w-6 h-6" />
-                                  </div>
-                              )}
+                        {/* Arrow to next */}
+                        {index < storyboard.length - 1 && (
+                          <div className="mx-2 text-slate-700 flex-shrink-0">
+                            <ArrowRight className="w-6 h-6" />
                           </div>
-                      ))}
-                      
-                      {/* Fade Out Block */}
-                      <div className="flex-shrink-0 flex items-center ml-2">
-                           <ArrowRight className="w-6 h-6 text-slate-700 mr-4" />
-                           <div className="w-40 bg-black rounded-xl border border-slate-800 flex flex-col items-center justify-center aspect-video opacity-50">
-                               <span className="text-xs text-slate-500">Fade Out</span>
-                           </div>
-                      </div>
+                        )}
+                      </React.Fragment>
+                    ))}
 
+                    {/* Fade Out Block */}
+                    <div className="flex-shrink-0 flex items-center ml-2">
+                      <ArrowRight className="w-6 h-6 text-slate-700 mr-4" />
+                      <div className="w-40 bg-black rounded-xl border border-slate-800 flex flex-col items-center justify-center aspect-video opacity-50">
+                        <span className="text-xs text-slate-500">Fade Out</span>
+                      </div>
+                    </div>
                   </div>
+                </div>
+
+                {/* Right: Details Panel (30%) */}
+                {selectedFrameIndex !== null && (
+                  <div className="flex-[3]">
+                    <DetailsPanel
+                      frame={storyboard[selectedFrameIndex]}
+                      frameIndex={selectedFrameIndex}
+                      hierarchyNode={hierarchyTree?.nodes[selectedFrameIndex]}
+                      hierarchyTree={hierarchyTree}
+                      allFrames={storyboard}
+                      aspectRatio={aspectRatio}
+                      onSelectFrame={setSelectedFrameIndex}
+                      onRegenerate={handleRegenerateFrame}
+                      isGenerating={isGeneratingFrames}
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Phase 3: Video Generation */}
@@ -1030,6 +1448,55 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({ analysis, markers, audioDur
                 </div>
               )}
           </div>
+      )}
+
+      {/* Feedback Dialog Modal */}
+      {showFeedbackDialog && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-2xl w-full p-6 animate-fade-in">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <MessageSquare className="w-5 h-5 text-pink-400" />
+                <h3 className="text-lg font-semibold text-slate-200">Provide Feedback (Optional)</h3>
+              </div>
+              <button
+                onClick={() => setShowFeedbackDialog(false)}
+                className="p-2 hover:bg-slate-800 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5 text-slate-400" />
+              </button>
+            </div>
+
+            <p className="text-sm text-slate-400 mb-4">
+              Tell the AI what you'd like to change or improve in the narrative. Be specific about characters, scenes, themes, or style. Leave blank to regenerate without guidance.
+            </p>
+
+            <textarea
+              value={feedbackText}
+              onChange={(e) => setFeedbackText(e.target.value)}
+              placeholder="e.g., 'Make it more cyberpunk themed', 'Add a car chase scene', 'Less abstract, more literal', 'Include a sunset in the final scene'..."
+              className="w-full h-32 bg-slate-950 border border-slate-700 text-slate-100 rounded-lg px-4 py-3 focus:ring-2 focus:ring-pink-500 focus:outline-none resize-none"
+            />
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => performRegeneratePlan(feedbackText.trim() || undefined)}
+                disabled={isPlanning}
+                className="flex-1 px-6 py-3 bg-pink-600 hover:bg-pink-500 text-white rounded-lg font-semibold shadow-lg shadow-pink-900/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isPlanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                {isPlanning ? "Regenerating..." : "Regenerate Narrative"}
+              </button>
+              <button
+                onClick={() => setShowFeedbackDialog(false)}
+                disabled={isPlanning}
+                className="px-6 py-3 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg font-semibold transition-all disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
     </div>

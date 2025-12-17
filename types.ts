@@ -59,6 +59,41 @@ export interface VideoPlan {
   scenes: SceneScript[];
 }
 
+// Hierarchy Types (Phase 2 Enhancement)
+
+export interface TransformationDelta {
+  cameraOperation: string;     // "Dolly forward 2x"
+  framingChange: string;        // "Character occupies 60% frame height"
+  backgroundElements: string;   // "Maintain window in background"
+  literalInstructions: string;  // Combined full instructions
+}
+
+export interface HierarchyNode {
+  frameIndex: number;
+  depth: number;                      // 0=parent, 1=child, 2=grandchild...
+  parentIndex: number | null;
+  childIndices: number[];
+  transformationDelta: TransformationDelta | null;
+  isReady: boolean;                   // True when parent available
+  score?: number;                     // Anchor score for parents
+}
+
+export interface HierarchyTree {
+  nodes: HierarchyNode[];             // Parallel array to storyboard
+  parentIndices: number[];            // Quick parent lookup
+  maxDepth: number;
+}
+
+export interface VideoPlanHierarchical extends VideoPlan {
+  hierarchy: HierarchyTree;
+  useHierarchy: boolean;
+}
+
+export interface StoryboardFrameHierarchical extends StoryboardFrame {
+  hierarchyNode?: HierarchyNode;
+  isBlocked?: boolean;                // Waiting for parent
+}
+
 // Phase 3 Types - Video Generation
 
 export interface AspectRatioDimensions {
@@ -88,3 +123,49 @@ export interface VideoGenerationState {
   progress: number;
   currentPhase: 'idle' | 'generating' | 'processing' | 'stitching' | 'complete';
 }
+
+// Project Management Types
+
+export interface ProjectData {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+
+  // Phase 1 Data
+  audioFileName: string;
+  audioDuration: number;
+  audioBlob?: Blob;
+  analysis: AudioAnalysis | null;
+  markers: Marker[];
+  onsetData: OnsetData | null;
+  density: number;
+  minDuration: number;
+  maxDuration: number;
+  customCount: string;
+  useCustomCount: boolean;
+
+  // Phase 2 Data
+  aspectRatio?: AspectRatio;
+  visualStyle?: string;
+  videoPlan?: VideoPlan | null;
+  storyboard?: StoryboardFrame[];
+  hierarchyTree?: HierarchyTree | null;  // Optional hierarchy data
+
+  // Phase 3 Data
+  videoClips?: VideoClip[];
+  finalVideoBlob?: Blob;
+}
+
+export interface ProjectMetadata {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  audioFileName: string;
+  markerCount: number;
+  hasStoryboard: boolean;
+  hasVideo: boolean;
+}
+
+export type StorageBackend = 'filesystem' | 'indexeddb' | 'none';

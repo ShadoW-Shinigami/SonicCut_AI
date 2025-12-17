@@ -14,22 +14,56 @@ SonicCut AI is a React/TypeScript web application that transforms audio files in
 
 - **Frontend**: React 19, TypeScript, Vite
 - **AI Models**:
-  - Google Gemini 2.5 (Flash & Flash-Image) for narrative and storyboard generation
+  - Google Gemini 2.5 Pro for narrative planning with extended thinking
+  - Google Gemini 2.5 Flash-Image for storyboard frame generation
   - Kling 2.5 Turbo Pro (via fal.ai) for video generation
 - **Audio Processing**: Web Audio API with custom DSP implementation
 - **Video Processing**: FFmpeg.wasm (browser-based)
+- **Storage**: IndexedDB for browser-based project persistence
 - **Styling**: Tailwind CSS
 
 ## Features
 
+### Core Features
 - **Automatic Beat Detection**: Custom "Desperation Threshold Algorithm" for intelligent cut marker placement
 - **AI Audio Analysis**: Gemini analyzes genre, theme, instruments, and lyrics
 - **Narrative Generation**: Creates cohesive storylines synchronized to music
 - **Character Consistency**: Generates character reference sheets for visual continuity
-- **Image-to-Image Pipeline**: Each storyboard frame references the previous for smooth transitions
 - **Adjustable Sensitivity**: Control beat detection density and duration constraints
 - **Video Speed Ramping**: Automatically adjusts clip speeds to match exact beat timing
 - **Browser-Based**: Runs entirely in the browser, no server required
+
+### Advanced Features
+- **Hierarchical Frame Generation**: Revolutionary parent-child frame relationships
+  - Anchor frames serve as parents, variants regenerate as children
+  - Regenerate a parent frame and all descendants update automatically
+  - Dramatically reduces regeneration time and improves consistency
+  - Visual hierarchy indicators with color-coded borders
+
+- **Project Management**: Full save/load system with autosave
+  - Multiple projects with automatic persistence (IndexedDB)
+  - Auto-generated project names based on audio files
+  - Visual save status indicators and timestamps
+  - Preserves all phases: audio analysis, markers, storyboard, and video
+
+- **Interactive Storyboard**: Click-to-select frame details
+  - Detailed frame viewer with parent-child navigation
+  - One-click frame regeneration with impact preview
+  - Character tags and interpolation prompts display
+
+- **Cost Estimation**: Real-time cost calculator
+  - Displays estimated total cost for images and videos
+  - Per-frame breakdown ($0.14/image, $0.35-$0.70/video)
+
+- **Concurrent Video Generation**: Generate 2 clips simultaneously
+  - Significantly faster video production
+  - Progress tracking for each clip
+
+- **Smart Error Recovery**: Automatic fixes and retries
+  - Auto-correct shot count mismatches
+  - Retry with progressive safety sanitization
+  - Exponential backoff for network errors
+  - FFmpeg timeout protection
 
 ## Getting Started
 
@@ -90,12 +124,18 @@ npm run preview
 ├── components/
 │   ├── FileUpload.tsx              # Audio file upload component
 │   ├── Waveform.tsx                # Waveform visualization
-│   └── VideoPlanner.tsx            # Storyboard and video generation
+│   ├── VideoPlanner.tsx            # Storyboard and video generation
+│   ├── ProjectSelector.tsx         # Project management dropdown
+│   ├── FrameCard.tsx               # Individual storyboard frame card
+│   └── DetailsPanel.tsx            # Frame details sidebar
+├── hooks/
+│   └── useProjectAutosave.ts       # Auto-save hook with debouncing
 └── services/
     ├── audioProcessingService.ts   # Beat detection and DSP
-    ├── geminiService.ts            # Gemini AI integration
-    ├── klingService.ts             # Kling video API
-    └── videoProcessingService.ts   # FFmpeg video processing
+    ├── geminiService.ts            # Gemini AI integration (narrative, hierarchy)
+    ├── klingService.ts             # Kling video API with retry logic
+    ├── videoProcessingService.ts   # FFmpeg video processing
+    └── projectStorageService.ts    # IndexedDB project persistence
 ```
 
 ## Key Algorithms
@@ -112,6 +152,43 @@ Maintains visual continuity by:
 - Generating 1:1 character reference sheets
 - Passing reference images to subsequent frame generation
 - Using multimodal prompting for consistent character appearance
+
+### Hierarchical Frame Generation
+Revolutionary approach that transforms storyboard generation:
+
+**Traditional Sequential Generation:**
+```
+Frame 1 → Frame 2 → Frame 3 → Frame 4 → ...
+(Each frame depends on the previous one)
+```
+
+**Hierarchical Generation:**
+```
+Frame 1 (Anchor/Parent)
+    ↓
+Frame 2 (Child)
+    ↓
+Frame 3 (Grandchild)
+
+Frame 4 (Anchor/Parent) ← Independent!
+    ↓
+Frame 5 (Child)
+```
+
+**Key Benefits:**
+- **Reduced Regeneration Cascade**: Regenerating a frame only affects its descendants, not the entire sequence
+- **Parallel Generation**: Parent frames can be generated simultaneously since they're independent
+- **Better Consistency**: Children explicitly reference their parent frame + transformation instructions
+- **Intelligent Anchors**: System scores each frame for "anchor-worthiness" based on action keywords
+- **Transformation Deltas**: Gemini analyzes parent-child relationships to create precise transformation instructions
+
+**How It Works:**
+1. Analyze narrative to identify anchor moments (explosions, revelations, key actions)
+2. Score each frame and select parents based on distribution and importance
+3. Build parent-child tree with depth tracking
+4. Generate transformation deltas describing exact changes between parent and child
+5. Generate frames: parents independently, children from their parent + delta
+6. Visual indicators: Color-coded borders show depth (blue=parent, purple=child, indigo=grandchild)
 
 ## Contributing
 
