@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AudioAnalysis, AudioState, Marker, OnsetData, AspectRatio, VideoPlan, StoryboardFrame, VideoClip } from './types';
+import { AudioAnalysis, AudioState, Marker, OnsetData, AspectRatio, VideoPlan, StoryboardFrame, VideoClip, HierarchyTree } from './types';
 import { analyzeAudioCreatively } from './services/geminiService';
 import { decodeAudio, computeOnsetEnvelope, generateMarkers, generateMarkersByCount } from './services/audioProcessingService';
 import Waveform from './components/Waveform';
@@ -42,6 +42,8 @@ const App: React.FC = () => {
   const [visualStyle, setVisualStyle] = useState<string>("Cinematic, High Contrast, Neo-Noir");
   const [videoPlan, setVideoPlan] = useState<VideoPlan | null>(null);
   const [storyboard, setStoryboard] = useState<StoryboardFrame[]>([]);
+  const [hierarchyTree, setHierarchyTree] = useState<HierarchyTree | null>(null);
+  const [useHierarchy, setUseHierarchy] = useState<boolean>(false);
 
   // Phase 3 State (lifted from VideoPlanner)
   const [videoClips, setVideoClips] = useState<VideoClip[]>([]);
@@ -65,6 +67,8 @@ const App: React.FC = () => {
     maxDuration,
     customCount,
     useCustomCount,
+    hierarchyTree,
+    useHierarchy,
     // Phase 2 state
     aspectRatio,
     visualStyle,
@@ -284,6 +288,8 @@ const App: React.FC = () => {
       // Project data: always reset to project's values (or empty)
       setVideoPlan(project.videoPlan || null);
       setStoryboard(project.storyboard || []);
+      setHierarchyTree(project.hierarchyTree || null);
+      setUseHierarchy(!!project.hierarchyTree); // Enable hierarchy if tree exists
 
       // Restore Phase 3 state: ALWAYS reset to project's values (or empty)
       setVideoClips(project.videoClips || []);
@@ -627,6 +633,10 @@ const App: React.FC = () => {
                   setVideoPlan={setVideoPlan}
                   storyboard={storyboard}
                   setStoryboard={setStoryboard}
+                  hierarchyTree={hierarchyTree}
+                  setHierarchyTree={setHierarchyTree}
+                  useHierarchy={useHierarchy}
+                  setUseHierarchy={setUseHierarchy}
                   videoClips={videoClips}
                   setVideoClips={setVideoClips}
                   finalVideoBlob={finalVideoBlob}
