@@ -691,8 +691,11 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
           clips[clipIndex].status = 'processing';
           setVideoClips([...clips]);
 
+          console.log(`🎬 Processing shot ${clipIndex + 1} (speed factor: ${clips[clipIndex].speedFactor.toFixed(2)}x)`);
+
           // Fetch video as blob
           const videoBlob = await fetchVideoAsBlob(clips[clipIndex].generatedVideoUrl!);
+          console.log(`📥 Fetched video blob: ${(videoBlob.size / 1024 / 1024).toFixed(2)}MB`);
 
           // Apply speed ramp (FFmpeg - must be serialized)
           const processedBlob = await applySpeedRamp(
@@ -714,8 +717,13 @@ const VideoPlanner: React.FC<VideoPlannerProps> = ({
           const totalProgress = (generatedCount / clips.length) * 50 + (processedCount / clips.length) * 50;
           setVideoState(prev => ({ ...prev, progress: totalProgress }));
 
+          console.log(`✅ Shot ${clipIndex + 1} processed successfully`);
+
+          // Small delay to allow FFmpeg WASM to fully clean up memory
+          await new Promise(resolve => setTimeout(resolve, 500));
+
         } catch (e) {
-          console.error(`Speed processing failed for shot ${clipIndex + 1}:`, e);
+          console.error(`❌ Speed processing failed for shot ${clipIndex + 1}:`, e);
           clips[clipIndex].status = 'error';
           clips[clipIndex].error = `Speed processing failed: ${(e as Error).message}`;
           setVideoClips([...clips]);
