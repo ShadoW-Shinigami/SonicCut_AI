@@ -62,6 +62,17 @@ const withTimeout = async <T>(
 };
 
 /**
+ * Safe file cleanup - ignores errors if file doesn't exist
+ */
+const safeDeleteFile = async (ff: FFmpeg, filename: string): Promise<void> => {
+  try {
+    await ff.deleteFile(filename);
+  } catch (e) {
+    // File doesn't exist, ignore
+  }
+};
+
+/**
  * Apply speed ramp with smooth ease-in-out curve
  * Uses FFmpeg setpts filter with expression for smooth acceleration/deceleration
  */
@@ -72,62 +83,78 @@ export const applySpeedRamp = async (
 ): Promise<Blob> => {
   const ff = await getFFmpeg(onProgress);
 
-  // Write input file
-  const inputData = new Uint8Array(await videoBlob.arrayBuffer());
-  await ff.writeFile('input.mp4', inputData);
+  // Use unique filenames to prevent conflicts
+  const timestamp = Date.now();
+  const inputFile = `input_${timestamp}.mp4`;
+  const outputFile = `output_${timestamp}.mp4`;
 
-  // For smooth ease-in-out, we use a more sophisticated approach:
-  // Divide the video into segments with varying speed
-  // Ease-in (first 15%): gradually accelerate
-  // Middle (70%): constant target speed
-  // Ease-out (last 15%): gradually decelerate
+  try {
+    // Cleanup any leftover files first
+    await safeDeleteFile(ff, inputFile);
+    await safeDeleteFile(ff, outputFile);
 
-  // Simple implementation using setpts with a single factor
-  // For a proper ease curve, we'd need frame-by-frame processing
-  // This approximation uses a combination of speed factors
+    // Write input file
+    const inputData = new Uint8Array(await videoBlob.arrayBuffer());
+    await ff.writeFile(inputFile, inputData);
 
-  if (Math.abs(speedFactor - 1) < 0.05) {
-    // If speed is nearly 1x, just copy
-    await withTimeout(
-      ff.exec([
-        '-i', 'input.mp4',
-        '-c', 'copy',
-        '-y', 'output.mp4'
-      ]),
-      120000,
-      'FFmpeg copy operation timed out after 2 minutes'
-    );
-  } else {
-    // Apply speed change with smooth interpolation
-    // setpts adjusts video timing, atempo adjusts audio
-    const ptsExpr = speedFactor > 1
-      ? `PTS/${speedFactor.toFixed(4)}`  // Speed up
-      : `PTS*${(1/speedFactor).toFixed(4)}`;  // Slow down
+    // For smooth ease-in-out, we use a more sophisticated approach:
+    // Divide the video into segments with varying speed
+    // Ease-in (first 15%): gradually accelerate
+    // Middle (70%): constant target speed
+    // Ease-out (last 15%): gradually decelerate
 
-    // Video-only processing (Kling videos don't have audio)
-    // We only apply video filters to avoid the "matches no streams" error
-    await withTimeout(
-      ff.exec([
-        '-i', 'input.mp4',
-        '-filter:v', `setpts=${ptsExpr}`,
-        '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', '23',
-        '-an',  // No audio
-        '-y', 'output.mp4'
-      ]),
-      120000,
-      'FFmpeg speed ramp operation timed out after 2 minutes'
-    );
+    // Simple implementation using setpts with a single factor
+    // For a proper ease curve, we'd need frame-by-frame processing
+    // This approximation uses a combination of speed factors
+
+    if (Math.abs(speedFactor - 1) < 0.05) {
+      // If speed is nearly 1x, just copy
+      await withTimeout(
+        ff.exec([
+          '-i', inputFile,
+          '-c', 'copy',
+          '-y', outputFile
+        ]),
+        120000,
+        'FFmpeg copy operation timed out after 2 minutes'
+      );
+    } else {
+      // Apply speed change with smooth interpolation
+      // setpts adjusts video timing, atempo adjusts audio
+      const ptsExpr = speedFactor > 1
+        ? `PTS/${speedFactor.toFixed(4)}`  // Speed up
+        : `PTS*${(1/speedFactor).toFixed(4)}`;  // Slow down
+
+      // Video-only processing (Kling videos don't have audio)
+      // We only apply video filters to avoid the "matches no streams" error
+      await withTimeout(
+        ff.exec([
+          '-i', inputFile,
+          '-filter:v', `setpts=${ptsExpr}`,
+          '-c:v', 'libx264',
+          '-preset', 'ultrafast', // Changed from 'fast' to reduce memory usage
+          '-crf', '23',
+          '-an',  // No audio
+          '-y', outputFile
+        ]),
+        120000,
+        'FFmpeg speed ramp operation timed out after 2 minutes'
+      );
+    }
+
+    const outputData = await ff.readFile(outputFile);
+
+    // Cleanup
+    await safeDeleteFile(ff, inputFile);
+    await safeDeleteFile(ff, outputFile);
+
+    return new Blob([outputData], { type: 'video/mp4' });
+  } catch (error) {
+    // Ensure cleanup even on error
+    await safeDeleteFile(ff, inputFile);
+    await safeDeleteFile(ff, outputFile);
+    throw error;
   }
-
-  const outputData = await ff.readFile('output.mp4');
-
-  // Cleanup
-  await ff.deleteFile('input.mp4');
-  await ff.deleteFile('output.mp4');
-
-  return new Blob([outputData], { type: 'video/mp4' });
 };
 
 /**
